@@ -1,0 +1,2 @@
+[toolchain]
+channel = "xtensa-esp32s3-none-elf"

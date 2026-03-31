@@ -1,0 +1,69 @@
+[package]
+edition      = "2021"
+name         = "rc-car"
+rust-version = "1.86"
+version      = "0.1.0"
+
+[[bin]]
+name = "rc-car"
+path = "./src/bin/main.rs"
+
+[build-dependencies]
+# serde = { version = "1.0", features = ["derive"] }
+# serde_json = "1.0"
+
+[dependencies]
+defmt                  = "1.0.1"
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3"] }
+esp-hal                = { version = "1.0.0", features = ["defmt", "esp32s3", "unstable", "rt"] }
+
+include-folder-macro = { path = "../include-folder-macro" }
+
+critical-section = "1.2.0"
+esp-backtrace = { version = "0.18.1", features = [
+  "defmt",
+  "esp32s3",
+  "panic-handler",
+] }
+
+edge-dhcp           = { version = "0.7.0" }
+edge-nal            = { version = "0.6.0" }
+# edge-nal-embassy    = { version = "0.8.1" }
+
+embassy-net = { version = "0.9.0", features = [ "tcp", "udp", "dhcpv4", "medium-ethernet",  "defmt"] }
+embedded-io         = { version = "0.7.0", default-features = false }
+embedded-io-async   = "0.7.0"
+embedded-hal-bus = "0.3.0"
+xtensa-lx-rt = { version = "0.19.0", features = ["esp32s3"] }
+esp-alloc        = "0.9.0"
+embassy-executor ={ version = "0.9.1", features = ["defmt", "nightly"] }
+picoserve = { version = "0.18.0", features = ["embassy"] }
+static_cell = { version = "2.1.1", features = ["nightly"] }
+embassy-time = "0.5.0"
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }
+embassy-sync = { version = "0.7.2", features = ["defmt"] }
+embassy-futures = { version = "0.1.2", features = ["defmt"] }
+embedded-hal = "1.0.0"
+esp-radio = { version = "0.17.0", features = [ "esp32s3", "coex", "esp-alloc", "unstable", "wifi" ] }
+esp-rtos = { version = "0.2.0", features = ["esp32s3", "embassy", "esp-radio"] }
+esp-println = { version = "0.16.1", features = ["esp32s3", "defmt-espflash"] }
+num = { version = "0.4.3", default-features = false, features = ["alloc"] }
+# embedded-svc = { version = "0.28.1", features = ["defmt"] }
+
+[profile.dev.package.esp-radio]
+opt-level = 3
+
+
+[profile.dev]
+# Rust debug is too slow.
+# For debug builds always builds with some optimization
+opt-level = 3
+
+[profile.release]
+codegen-units    = 1     # LLVM can perform better optimizations using a single thread
+debug            = 2
+debug-assertions = false
+incremental      = false
+lto              = 'fat'
+opt-level        = 's'
+overflow-checks  = false
