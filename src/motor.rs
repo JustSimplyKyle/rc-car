@@ -3,8 +3,10 @@ use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{self, Receiver, Sender};
 use embassy_sync::mutex::Mutex;
+use embassy_time::Duration;
 use embedded_hal::pwm::SetDutyCycle;
-use esp_hal::gpio::{Output, OutputPin};
+use esp_hal::gpio::{Level, Output, OutputPin};
+use esp_hal::ledc::{self, timer, Ledc, LowSpeed};
 use esp_hal::mcpwm::operator::{PwmPin, PwmPinConfig};
 use esp_hal::mcpwm::timer::{PwmWorkingMode, Timer};
 use esp_hal::mcpwm::{self, McPwm, PeripheralClockConfig, PwmPeripheral};
@@ -17,10 +19,12 @@ use static_cell::StaticCell;
 use core::convert::Infallible;
 use core::iter;
 use core::marker::PhantomData;
+use core::mem::MaybeUninit;
 
 use crate::mk_static;
 
 const CHANNEL_SIZE: usize = 4;
+const INITIAL_ANGLE: i32 = 0;
 
 fn duty_from_angle(deg: u32, max_duty_cycle: u32) -> u16 {
     let min_duty = (25 * max_duty_cycle) / 1000;
@@ -91,6 +95,7 @@ pub enum Speed {
     Normal,
     Fast,
     Instant,
+    Custom(Duration),
 }
 
 pub enum ServoCmd {
@@ -123,6 +128,7 @@ pub async fn servo_motor_loop<PWM: PwmPeripheral>(
                 Speed::Normal => embassy_time::Timer::after_millis(10).await,
                 Speed::Fast => embassy_time::Timer::after_millis(5).await,
                 Speed::Instant => {}
+                Speed::Custom(time) => embassy_time::Timer::after(time).await,
             }
         }
         initial_angle = target_angle;
@@ -155,8 +161,6 @@ pub async fn step_motor_loop<PWM: PwmPeripheral>(
         }
     }
 }
-
-const INITIAL_ANGLE: i32 = 90;
 
 macro_rules! impl_servo_motor_task {
     ($pwm:ty, $task_name:ident) => {
@@ -552,5 +556,233 @@ where
 {
     pub fn finish(mut self) -> M {
         self.collected[0].take().unwrap()
+    }
+}
+
+pub mod dc_motor {
+    use defmt::info;
+    use embedded_hal::pwm::SetDutyCycle;
+    use esp_hal::{
+        gpio::{DriveMode, Level, Output, OutputPin},
+        ledc::{
+            self,
+            channel::{self, Channel, ChannelIFace},
+            timer::{self, LSClockSource, Timer, TimerIFace},
+            LSGlobalClkSource, Ledc, LowSpeed,
+        },
+    };
+    use static_cell::{make_static, StaticCell};
+
+    use crate::mk_static;
+
+    pub struct DCMotor<'a> {
+        pub pina: Output<'a>,
+        pub pinb: Output<'a>,
+        pub pwm: Channel<'a, LowSpeed>,
+    }
+
+    impl<'a> DCMotor<'a> {
+        fn new(
+            pina: impl OutputPin + 'a,
+            pinb: impl OutputPin + 'a,
+            pwm: Channel<'a, LowSpeed>,
+        ) -> Self {
+            Self {
+                pina: Output::new(pina, Level::Low, Default::default()),
+                pinb: Output::new(pinb, Level::Low, Default::default()),
+                pwm,
+            }
+        }
+        pub fn set_duty_percent(&self, duty_percentage: u8) {
+            self.pwm.set_duty(duty_percentage).unwrap();
+        }
+        pub fn go_front(&mut self) {
+            self.pina.set_high();
+            self.pinb.set_low();
+        }
+        pub fn go_back(&mut self) {
+            self.pina.set_low();
+            self.pinb.set_high();
+        }
+        pub fn stop(&mut self) {
+            self.pina.set_low();
+            self.pinb.set_low();
+        }
+    }
+
+    /// The Typestate Builder
+    pub struct MotorSpawner<'a, State> {
+        ledc: &'a Ledc<'a>,
+        // Replaces the `static TIMER_STORAGE`. Tracks which Timer (0-3) holds which Config.
+        timer_configs: [Option<timer::config::Config<LSClockSource>>; 4],
+        motors: State,
+    }
+
+    impl<'a, State> MotorSpawner<'a, State> {
+        /// Helper to find an existing timer config, or assign an empty slot
+        fn get_or_assign_timer(
+            mut configs: [Option<timer::config::Config<LSClockSource>>; 4],
+            new_config: timer::config::Config<LSClockSource>,
+        ) -> (
+            timer::Number,
+            [Option<timer::config::Config<LSClockSource>>; 4],
+        ) {
+            let is_eq = |x: ledc::timer::config::Config<LSClockSource>,
+                         y: ledc::timer::config::Config<LSClockSource>| {
+                x.duty == y.duty && x.frequency == y.frequency
+            };
+            // 1. Find matching configuration to reuse
+            for i in 0..4 {
+                if let Some(cfg) = configs[i] {
+                    // Assuming Config implements PartialEq. If not, compare fields manually.
+                    if is_eq(cfg, new_config) {
+                        return (Self::idx_to_timer(i), configs);
+                    }
+                }
+            }
+
+            // 2. If no match, assign to the first empty slot
+            for i in 0..4 {
+                if configs[i].is_none() {
+                    configs[i] = Some(new_config);
+                    return (Self::idx_to_timer(i), configs);
+                }
+            }
+
+            panic!("All 4 LEDC timers are in use with different configurations!");
+        }
+
+        fn idx_to_timer(idx: usize) -> timer::Number {
+            match idx {
+                0 => timer::Number::Timer0,
+                1 => timer::Number::Timer1,
+                2 => timer::Number::Timer2,
+                3 => timer::Number::Timer3,
+                _ => unreachable!(),
+            }
+        }
+        fn timer_to_idx(timer: timer::Number) -> usize {
+            match timer {
+                timer::Number::Timer0 => 0,
+                timer::Number::Timer1 => 1,
+                timer::Number::Timer2 => 2,
+                timer::Number::Timer3 => 3,
+            }
+        }
+    }
+
+    static TIMER_STORAGE: [StaticCell<ledc::timer::Timer<'static, LowSpeed>>; 4] = [
+        StaticCell::new(),
+        StaticCell::new(),
+        StaticCell::new(),
+        StaticCell::new(),
+    ];
+
+    // Initial state: 0 motors
+    impl<'a: 'static> MotorSpawner<'a, ()> {
+        pub fn new(ledc: &'a Ledc<'a>) -> Self {
+            Self {
+                ledc,
+                timer_configs: [None; 4],
+                motors: (),
+            }
+        }
+
+        pub fn spawn<PwmPin, DirA, DirB>(
+            self,
+            pwm_pin: PwmPin,
+            pina: DirA,
+            pinb: DirB,
+            config: timer::config::Config<LSClockSource>,
+        ) -> MotorSpawner<'a, [DCMotor<'a>; 1]>
+        where
+            PwmPin: OutputPin + 'a,
+            DirA: OutputPin + 'a,
+            DirB: OutputPin + 'a,
+        {
+            // 1. Resolve which hardware timer number to use
+            let (timer_num, next_configs) = Self::get_or_assign_timer(self.timer_configs, config);
+            info!("{}", timer_num);
+
+            // 2. Instantiate and configure hardware timer locally
+            let hw_timer = TIMER_STORAGE[Self::timer_to_idx(timer_num)]
+                .init(self.ledc.timer::<LowSpeed>(timer_num));
+            hw_timer.configure(config).unwrap();
+
+            // 3. Configure the PWM Channel
+            let mut pwm = self.ledc.channel(channel::Number::Channel0, pwm_pin);
+
+            pwm.configure(channel::config::Config {
+                timer: hw_timer,
+                duty_pct: 0,
+                drive_mode: DriveMode::PushPull,
+            })
+            .unwrap();
+
+            MotorSpawner {
+                ledc: self.ledc,
+                timer_configs: next_configs,
+                motors: [DCMotor::new(pina, pinb, pwm)],
+            }
+        }
+    }
+
+    macro_rules! impl_spawner {
+        ($from:literal, $to:literal, $channel:ident, [$($m:ident),*]) => {
+            impl<'a:'static > MotorSpawner<'a, [DCMotor<'a>; $from]> {
+                pub fn spawn<PwmPin: 'a, DirA: 'a, DirB: 'a>(
+                    self,
+                    pwm_pin: PwmPin, pina: DirA, pinb: DirB,
+                    config: timer::config::Config<LSClockSource>,
+                ) -> MotorSpawner<'a, [DCMotor<'a>; $to]>
+                where
+                    PwmPin: OutputPin, DirA: OutputPin, DirB: OutputPin,
+                {
+                    let (timer_num, next_configs) = Self::get_or_assign_timer(self.timer_configs, config);
+                    info!("{}", timer_num);
+
+                    let hw_timer = TIMER_STORAGE[Self::timer_to_idx(timer_num)]
+                        .init(self.ledc.timer::<LowSpeed>(timer_num));
+                    hw_timer.configure(config).unwrap();
+
+                    let mut pwm = self.ledc.channel(channel::Number::$channel, pwm_pin);
+
+                    pwm.configure(channel::config::Config {
+                        timer: hw_timer,
+                        duty_pct: 0,
+                        drive_mode: DriveMode::PushPull,
+                    }).unwrap();
+
+                    let new_motor = DCMotor::new(pina, pinb, pwm);
+
+                    let [$($m),*] = self.motors;
+                    MotorSpawner {
+                        ledc: self.ledc,
+                        timer_configs: next_configs,
+                        motors: [$($m,)* new_motor],
+                    }
+                }
+
+                /// Returns the perfectly sized array of built motors
+                pub fn finish(self) -> [DCMotor<'a>; $from] {
+                    self.motors
+                }
+            }
+        };
+    }
+
+    // impl_spawner(0, 1, Channel0, m-1)
+    impl_spawner!(1, 2, Channel1, [m0]);
+    impl_spawner!(2, 3, Channel2, [m0, m1]);
+    impl_spawner!(3, 4, Channel3, [m0, m1, m2]);
+    impl_spawner!(4, 5, Channel4, [m0, m1, m2, m3]);
+    impl_spawner!(5, 6, Channel5, [m0, m1, m2, m3, m4]);
+    impl_spawner!(6, 7, Channel6, [m0, m1, m2, m3, m4, m5]);
+    impl_spawner!(7, 8, Channel7, [m0, m1, m2, m3, m4, m5, m6]);
+
+    impl<'a> MotorSpawner<'a, [DCMotor<'a>; 8]> {
+        pub fn finish(self) -> [DCMotor<'a>; 8] {
+            self.motors
+        }
     }
 }

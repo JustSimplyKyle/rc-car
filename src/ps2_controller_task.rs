@@ -57,17 +57,25 @@ pub struct Ps2GamepadStatus {
 }
 
 impl Ps2GamepadStatus {
-    pub fn button(&self, button: Button) -> bool {
+    pub fn pressed(&self, button: Button) -> bool {
         let mask: u16 = button.into();
 
         // Buttons are active LOW, so we invert raw_buttons.
         (!self.raw_buttons & mask) != 0
     }
+    pub fn any<const T: usize>(&self, buttons: impl Into<[Button; T]>) -> bool {
+        let buttons = buttons.into();
+        buttons.iter().any(|x| self.pressed(*x))
+    }
+    pub fn all<const T: usize>(&self, buttons: impl Into<[Button; T]>) -> bool {
+        let buttons = buttons.into();
+        buttons.iter().all(|x| self.pressed(*x))
+    }
     pub fn active_buttons(&self) -> [Option<Button>; 16] {
         let mut active = [const { None }; 16]; // Max 16 buttons
         let mut i = 0;
         for &btn in &Button::ALL {
-            if self.button(btn) {
+            if self.pressed(btn) {
                 active[i] = Some(btn);
                 i += 1;
             }
