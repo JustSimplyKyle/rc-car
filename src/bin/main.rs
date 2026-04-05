@@ -8,15 +8,13 @@ extern crate rc_car;
 use embassy_executor::Spawner;
 use embassy_time::Timer;
 use esp_backtrace as _;
-use esp_hal::ledc::channel::Channel;
-use esp_hal::ledc::{self, LowSpeed};
+use esp_hal::ledc::{self};
 use esp_hal::{clock::CpuClock, delay::Delay, timer::timg::TimerGroup};
 use esp_println as _;
 use num::{clamp, FromPrimitive, ToPrimitive, Unsigned};
 use rc_car::motor::{self, ServoCmd, Speed};
 use rc_car::ps2::Ps2Controller;
 use rc_car::ps2_controller_task::PS2_GAMEPAD;
-use rc_car::web::{start_web_server, COMMAND_CHANNEL};
 use static_cell::make_static;
 
 esp_bootloader_esp_idf::esp_app_desc!();
@@ -47,15 +45,15 @@ async fn main(spawner: Spawner) -> ! {
 
     let (servo_motor1, servo_motor2, servo_motor3) =
         motor::MotorSpawner::new_servo(peripherals.MCPWM0, spawner.clone())
-            .spawn(peripherals.GPIO13)
-            .spawn(peripherals.GPIO14)
-            .spawn(peripherals.GPIO15)
+            .spawn(peripherals.GPIO13, 30)
+            .spawn(peripherals.GPIO14, None)
+            .spawn(peripherals.GPIO15, 90)
             .finish();
 
     let (servo_motor4, servo_motor5) =
         motor::MotorSpawner::new_servo(peripherals.MCPWM1, spawner.clone())
-            .spawn(peripherals.GPIO40)
-            .spawn(peripherals.GPIO41)
+            .spawn(peripherals.GPIO40, 90)
+            .spawn(peripherals.GPIO41, None)
             .finish();
 
     let delay = Delay::new();
@@ -74,6 +72,8 @@ async fn main(spawner: Spawner) -> ! {
         .iter()
         .cycle();
 
+    speed_select.next();
+
     use esp_hal::ledc::timer;
     use esp_hal::time::Rate;
 
@@ -87,37 +87,39 @@ async fn main(spawner: Spawner) -> ! {
     };
 
     let config_n20 = timer::config::Config {
-        frequency: Rate::from_khz(5), // Safe for L298N, good for N20
+        frequency: Rate::from_khz(1),
         duty: timer::config::Duty::Duty8Bit,
         clock_source: timer::LSClockSource::APBClk,
     };
 
-    let [mut motor_power, mut motor_n20] = motor::dc_motor::MotorSpawner::new(ledc)
-        // Becomes Channel 0. Takes up Hardware Timer 0
+    let [mut motor_n20, mut motor_power] = motor::dc_motor::MotorSpawner::new(ledc)
         .spawn(
             peripherals.GPIO16,
             peripherals.GPIO17,
             peripherals.GPIO18,
-            config_power_motor,
+            config_n20,
         )
-        // Becomes Channel 1. Takes up Hardware Timer 1 (different config)
         .spawn(
             peripherals.GPIO10,
             peripherals.GPIO11,
             peripherals.GPIO12,
-            config_n20,
+            config_power_motor,
         )
         .finish();
 
-    let mut servo1_angle = StatefulAngleManager::new();
+    let mut servo1_angle = StatefulAngleManager {
+        current_angle: 30,
+        min_angle: 5,
+        max_angle: 70,
+        step_size: 2,
+    };
+
     let mut servo2_angle = StatefulAngleManager::new();
-    let mut servo3_angle = StatefulAngleManager::new();
-    let mut servo4_angle = StatefulAngleManager::new();
+    let mut servo3_angle = StatefulAngleManager::new_centered();
+    let mut servo4_angle = StatefulAngleManager::new_centered();
 
-    motor_n20.set_duty_percent(50);
-
-    motor_power.set_duty_percent(80);
-    motor_power.set_duty_percent(40);
+    motor_n20.set_duty_percent(60);
+    motor_power.set_duty_percent(100);
 
     Timer::after_secs(1).await;
 
@@ -151,8 +153,6 @@ async fn main(spawner: Spawner) -> ! {
             info!("{} pressed", btn);
         }
 
-        // let servo1_angle = analog_to_servo(ps2.right_analog_stick.x); // 0 to 255
-
         if ps2.right_analog_stick.x > 128 + 5 {
             servo1_angle.increment()
         }
@@ -172,10 +172,10 @@ async fn main(spawner: Spawner) -> ! {
             servo3_angle.increment();
         }
         if ps2.pressed(Button::Up) {
-            servo4_angle.increment();
+            servo4_angle.decrement();
         }
         if ps2.pressed(Button::Down) {
-            servo4_angle.decrement();
+            servo4_angle.increment();
         }
         if ps2.any([Button::X, Button::B]) {
             if ps2.pressed(Button::X) {
@@ -200,7 +200,10 @@ async fn main(spawner: Spawner) -> ! {
             motor_n20.set_duty_percent(s);
         }
 
-        info!("{}", servo1_angle.current_angle);
+        info!("1: {}", servo1_angle.current_angle);
+        info!("2: {}", servo2_angle.current_angle);
+        info!("3: {}", servo3_angle.current_angle);
+        info!("4: {}", servo4_angle.current_angle);
         servo_motor1
             .try_send(ServoCmd::TurnToAngle(servo1_angle.current_angle as i32))
             .ok();
@@ -220,9 +223,9 @@ async fn main(spawner: Spawner) -> ! {
 
 pub struct StatefulAngleManager {
     pub current_angle: u32,
-    min_angle: u32,
-    max_angle: u32,
-    step_size: u32,
+    pub min_angle: u32,
+    pub max_angle: u32,
+    pub step_size: u32,
 }
 
 impl StatefulAngleManager {
@@ -237,6 +240,15 @@ impl StatefulAngleManager {
     pub fn new_centered() -> Self {
         Self {
             current_angle: 90,
+            min_angle: 0,
+            max_angle: 180,
+            step_size: 5,
+        }
+    }
+
+    pub fn new_with_angle(current_angle: u32) -> Self {
+        Self {
+            current_angle,
             min_angle: 0,
             max_angle: 180,
             step_size: 5,

@@ -3,7 +3,7 @@ use embassy_executor::Spawner;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::{self, Receiver, Sender};
 use embassy_sync::mutex::Mutex;
-use embassy_time::Duration;
+use embassy_time::{Duration, Instant};
 use embedded_hal::pwm::SetDutyCycle;
 use esp_hal::gpio::{Level, Output, OutputPin};
 use esp_hal::ledc::{self, timer, Ledc, LowSpeed};
@@ -17,14 +17,9 @@ use static_cell::make_static;
 use static_cell::StaticCell;
 
 use core::convert::Infallible;
-use core::iter;
 use core::marker::PhantomData;
-use core::mem::MaybeUninit;
-
-use crate::mk_static;
 
 const CHANNEL_SIZE: usize = 4;
-const INITIAL_ANGLE: i32 = 0;
 
 fn duty_from_angle(deg: u32, max_duty_cycle: u32) -> u16 {
     let min_duty = (25 * max_duty_cycle) / 1000;
@@ -80,7 +75,7 @@ pub trait PwmController<'d, PWM: PwmPeripheral>: Sized {
         Self::MAPPINGS[operator].1
     }
 
-    fn new(pin: ErasedPwmPin<'d, PWM>, spawner: &Spawner) -> Self;
+    fn new(pin: ErasedPwmPin<'d, PWM>, spawner: &Spawner, initial_angle: i32) -> Self;
 }
 
 // ---------------------------------------------------------------------------
@@ -103,6 +98,8 @@ pub enum ServoCmd {
     SetSpeed(Speed),
 }
 
+static MOTOR_MOVING: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
+
 pub async fn servo_motor_loop<PWM: PwmPeripheral>(
     mut initial_angle: i32,
     mut speed: Speed,
@@ -110,6 +107,20 @@ pub async fn servo_motor_loop<PWM: PwmPeripheral>(
     mut pwm_pin: ErasedPwmPin<'static, PWM>,
 ) {
     let mut target_angle = initial_angle;
+
+    info!("Moving motor to initial pos.");
+
+    let _guard = MOTOR_MOVING.lock().await;
+    let period = pwm_pin.period();
+    pwm_pin.set_timestamp(duty_from_angle(
+        initial_angle.clamp(0, 180) as u32,
+        period.into(),
+    ));
+    embassy_time::Timer::after_millis(500).await;
+    drop(_guard);
+
+    info!("ending moving motor to initial pos");
+
     loop {
         match cmd.receive().await {
             ServoCmd::TurnToAngle(new_angle) => target_angle = new_angle,
@@ -117,12 +128,18 @@ pub async fn servo_motor_loop<PWM: PwmPeripheral>(
         }
         let period = pwm_pin.period();
 
-        for angle in range_step(
-            initial_angle,
-            target_angle,
-            (target_angle - initial_angle).signum(),
-        ) {
-            pwm_pin.set_timestamp(duty_from_angle(angle as u32, period.into()));
+        let diff = target_angle - initial_angle;
+
+        if diff == 0 {
+            continue;
+        }
+
+        info!("Moving motor");
+
+        let step = diff.signum();
+
+        for angle in range_step(initial_angle, target_angle, step) {
+            pwm_pin.set_timestamp(duty_from_angle(angle.clamp(0, 180) as u32, period.into()));
             match speed {
                 Speed::Slow => embassy_time::Timer::after_millis(15).await,
                 Speed::Normal => embassy_time::Timer::after_millis(10).await,
@@ -131,10 +148,12 @@ pub async fn servo_motor_loop<PWM: PwmPeripheral>(
                 Speed::Custom(time) => embassy_time::Timer::after(time).await,
             }
         }
+
         initial_angle = target_angle;
+
+        info!("finished moving");
     }
 }
-
 pub enum StepCmd {
     Forward { duty: u8 },
     Backward { duty: u8 },
@@ -180,7 +199,11 @@ macro_rules! impl_servo_motor_task {
                 (20_000, Rate::from_hz(50)),
                 (20_000, Rate::from_hz(50)),
             ];
-            fn new(pin: ErasedPwmPin<'static, $pwm>, spawner: &Spawner) -> Self {
+            fn new(
+                pin: ErasedPwmPin<'static, $pwm>,
+                spawner: &Spawner,
+                initial_angle: i32,
+            ) -> Self {
                 static CHANNELS: [StaticCell<
                     channel::Channel<CriticalSectionRawMutex, ServoCmd, CHANNEL_SIZE>,
                 >; 3] = [StaticCell::new(), StaticCell::new(), StaticCell::new()];
@@ -191,7 +214,7 @@ macro_rules! impl_servo_motor_task {
 
                 spawner
                     .spawn($task_name(
-                        INITIAL_ANGLE,
+                        initial_angle,
                         Speed::Fast,
                         channel.receiver(),
                         pin,
@@ -252,7 +275,7 @@ impl<'d, PWM: PwmPeripheral> PwmController<'d, PWM> for StepMotorBuilder<'d, PWM
         (100, Rate::from_khz(1)),
         (100, Rate::from_khz(1)),
     ];
-    fn new(pin: ErasedPwmPin<'d, PWM>, _spawner: &Spawner) -> Self {
+    fn new(pin: ErasedPwmPin<'d, PWM>, _spawner: &Spawner, _initial_angle: i32) -> Self {
         Self { pwm_pin: pin }
     }
 }
@@ -288,53 +311,6 @@ impl<'d, PWM: PwmPeripheral> StepMotor<'d, PWM> {
     pub fn stop(&mut self) {
         self.pina.set_low();
         self.pinb.set_low();
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Custom (mixed) motor
-// ---------------------------------------------------------------------------
-
-pub struct CustomMotor<'d, PWM: PwmPeripheral> {
-    pwm_pin: ErasedPwmPin<'d, PWM>,
-}
-
-impl<'d, PWM: PwmPeripheral> PwmController<'d, PWM> for CustomMotor<'d, PWM> {
-    const MAPPINGS: [(u16, Rate); 3] = [
-        (20_000, Rate::from_hz(50)), // op0 — servo
-        (100, Rate::from_khz(1)),    // op1 — stepper
-        (100, Rate::from_khz(1)),    // op2 — stepper
-    ];
-    fn new(pin: ErasedPwmPin<'d, PWM>, _spawner: &Spawner) -> Self {
-        Self { pwm_pin: pin }
-    }
-}
-
-impl<'d, PWM: PwmPeripheral> CustomMotor<'d, PWM> {
-    /// Only valid for op0 (servo-configured operator).
-    pub fn set_angle(&mut self, angle: u32) {
-        let op = self.pwm_pin.operator_index();
-        assert_eq!(
-            Self::MAPPINGS[op],
-            (20_000, Rate::from_hz(50)), // Replaced old struct mappings with tuple literal checks
-            "set_angle called on a non-servo operator"
-        );
-        let period = self.pwm_pin.period();
-        self.pwm_pin
-            .set_timestamp(duty_from_angle(angle, period.into()));
-    }
-
-    /// Only valid for op1/op2 (stepper-configured operators).
-    pub fn set_duty_cycle_percent(&mut self, duty_percentage: u8) {
-        let op = self.pwm_pin.operator_index();
-        assert_eq!(
-            Self::MAPPINGS[op],
-            (100, Rate::from_khz(1)),
-            "set_duty_cycle_percent called on a non-stepper operator"
-        );
-        self.pwm_pin
-            .set_duty_cycle_percent(duty_percentage)
-            .unwrap();
     }
 }
 
@@ -375,12 +351,6 @@ where
 
 impl<'d, PWM: PwmPeripheral> MotorSpawner<'d, PWM, 3, StepMotorBuilder<'d, PWM>> {
     pub fn new_step(pwm: PWM, spawner: Spawner) -> Self {
-        Self::new(pwm, spawner)
-    }
-}
-
-impl<'d, PWM: PwmPeripheral> MotorSpawner<'d, PWM, 3, CustomMotor<'d, PWM>> {
-    pub fn new_custom(pwm: PWM, spawner: Spawner) -> Self {
         Self::new(pwm, spawner)
     }
 }
@@ -434,6 +404,7 @@ where
         mut self,
         operator_index: usize,
         pin: impl OutputPin + 'd,
+        initial_angle: i32,
     ) -> MotorSpawner<'d, PWM, SLOTS, Motor> {
         let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(2)).unwrap();
 
@@ -462,7 +433,7 @@ where
             _ => unreachable!(),
         };
 
-        self.collected[operator_index] = Some(Motor::new(pwm_pin, &self.spawner));
+        self.collected[operator_index] = Some(Motor::new(pwm_pin, &self.spawner, initial_angle));
         self
     }
 }
@@ -494,8 +465,13 @@ where
     PWM: PwmPeripheral + 'd,
     M: PwmController<'d, PWM>,
 {
-    pub fn spawn(self, pin: impl OutputPin + 'd) -> MotorSpawner<'d, PWM, 2, M> {
-        let next = self.spawn_op(0, pin);
+    pub fn spawn(
+        self,
+        pin: impl OutputPin + 'd,
+        initial_angle: impl Into<Option<i32>>,
+    ) -> MotorSpawner<'d, PWM, 2, M> {
+        let initial_angle = initial_angle.into().unwrap_or(0);
+        let next = self.spawn_op(0, pin, initial_angle);
         next.update_slot()
     }
 }
@@ -505,8 +481,13 @@ where
     PWM: PwmPeripheral + 'd,
     M: PwmController<'d, PWM>,
 {
-    pub fn spawn(self, pin: impl OutputPin + 'd) -> MotorSpawner<'d, PWM, 1, M> {
-        let next = self.spawn_op(1, pin);
+    pub fn spawn(
+        self,
+        pin: impl OutputPin + 'd,
+        initial_angle: impl Into<Option<i32>>,
+    ) -> MotorSpawner<'d, PWM, 1, M> {
+        let initial_angle = initial_angle.into().unwrap_or(0);
+        let next = self.spawn_op(1, pin, initial_angle);
         next.update_slot()
     }
 }
@@ -516,8 +497,13 @@ where
     PWM: PwmPeripheral + 'd,
     M: PwmController<'d, PWM>,
 {
-    pub fn spawn(self, pin: impl OutputPin + 'd) -> MotorSpawner<'d, PWM, 0, M> {
-        let next = self.spawn_op(2, pin);
+    pub fn spawn(
+        self,
+        pin: impl OutputPin + 'd,
+        initial_angle: impl Into<Option<i32>>,
+    ) -> MotorSpawner<'d, PWM, 0, M> {
+        let initial_angle = initial_angle.into().unwrap_or(0);
+        let next = self.spawn_op(2, pin, initial_angle);
         next.update_slot()
     }
 }
@@ -560,8 +546,6 @@ where
 }
 
 pub mod dc_motor {
-    use defmt::info;
-    use embedded_hal::pwm::SetDutyCycle;
     use esp_hal::{
         gpio::{DriveMode, Level, Output, OutputPin},
         ledc::{
@@ -571,9 +555,7 @@ pub mod dc_motor {
             LSGlobalClkSource, Ledc, LowSpeed,
         },
     };
-    use static_cell::{make_static, StaticCell};
-
-    use crate::mk_static;
+    use static_cell::StaticCell;
 
     pub struct DCMotor<'a> {
         pub pina: Output<'a>,
@@ -610,46 +592,54 @@ pub mod dc_motor {
         }
     }
 
-    /// The Typestate Builder
     pub struct MotorSpawner<'a, State> {
         ledc: &'a Ledc<'a>,
-        // Replaces the `static TIMER_STORAGE`. Tracks which Timer (0-3) holds which Config.
-        timer_configs: [Option<timer::config::Config<LSClockSource>>; 4],
+        timer_configs: [Option<(
+            timer::config::Config<LSClockSource>,
+            &'a timer::Timer<'a, LowSpeed>,
+        )>; 4],
         motors: State,
     }
 
-    impl<'a, State> MotorSpawner<'a, State> {
-        /// Helper to find an existing timer config, or assign an empty slot
+    impl<'a: 'static, State> MotorSpawner<'a, State> {
         fn get_or_assign_timer(
-            mut configs: [Option<timer::config::Config<LSClockSource>>; 4],
+            ledc: &'a Ledc<'a>,
+            mut configs: [Option<(
+                timer::config::Config<LSClockSource>,
+                &'a timer::Timer<'a, LowSpeed>,
+            )>; 4],
             new_config: timer::config::Config<LSClockSource>,
         ) -> (
-            timer::Number,
-            [Option<timer::config::Config<LSClockSource>>; 4],
+            &'a timer::Timer<'a, LowSpeed>,
+            [Option<(
+                timer::config::Config<LSClockSource>,
+                &'a timer::Timer<'a, LowSpeed>,
+            )>; 4],
         ) {
-            let is_eq = |x: ledc::timer::config::Config<LSClockSource>,
-                         y: ledc::timer::config::Config<LSClockSource>| {
+            let is_eq = |x: &timer::config::Config<LSClockSource>,
+                         y: &timer::config::Config<LSClockSource>| {
                 x.duty == y.duty && x.frequency == y.frequency
             };
-            // 1. Find matching configuration to reuse
-            for i in 0..4 {
-                if let Some(cfg) = configs[i] {
-                    // Assuming Config implements PartialEq. If not, compare fields manually.
-                    if is_eq(cfg, new_config) {
-                        return (Self::idx_to_timer(i), configs);
-                    }
-                }
+
+            if let Some((_, timer_ref)) = configs
+                .iter()
+                .filter_map(|x| x.as_ref())
+                .find(|(x, _)| is_eq(x, &new_config))
+            {
+                return (*timer_ref, configs);
             }
 
-            // 2. If no match, assign to the first empty slot
-            for i in 0..4 {
-                if configs[i].is_none() {
-                    configs[i] = Some(new_config);
-                    return (Self::idx_to_timer(i), configs);
-                }
-            }
+            // find empty slots
+            let i = configs
+                .iter()
+                .position(|slot| slot.is_none())
+                .expect("All 4 LEDC timers are in use with different configurations!");
 
-            panic!("All 4 LEDC timers are in use with different configurations!");
+            let hw_timer = ledc.timer::<LowSpeed>(Self::idx_to_timer(i));
+            let timer_ref = TIMER_STORAGE[i].init(hw_timer);
+            timer_ref.configure(new_config).unwrap();
+            configs[i] = Some((new_config, timer_ref));
+            return (timer_ref, configs);
         }
 
         fn idx_to_timer(idx: usize) -> timer::Number {
@@ -661,14 +651,6 @@ pub mod dc_motor {
                 _ => unreachable!(),
             }
         }
-        fn timer_to_idx(timer: timer::Number) -> usize {
-            match timer {
-                timer::Number::Timer0 => 0,
-                timer::Number::Timer1 => 1,
-                timer::Number::Timer2 => 2,
-                timer::Number::Timer3 => 3,
-            }
-        }
     }
 
     static TIMER_STORAGE: [StaticCell<ledc::timer::Timer<'static, LowSpeed>>; 4] = [
@@ -678,57 +660,17 @@ pub mod dc_motor {
         StaticCell::new(),
     ];
 
-    // Initial state: 0 motors
-    impl<'a: 'static> MotorSpawner<'a, ()> {
-        pub fn new(ledc: &'a Ledc<'a>) -> Self {
-            Self {
+    impl<'a: 'static> MotorSpawner<'a, [DCMotor<'a>; 0]> {
+        pub fn new(ledc: &'a Ledc<'a>) -> MotorSpawner<'a, [DCMotor<'a>; 0]> {
+            MotorSpawner {
                 ledc,
                 timer_configs: [None; 4],
-                motors: (),
-            }
-        }
-
-        pub fn spawn<PwmPin, DirA, DirB>(
-            self,
-            pwm_pin: PwmPin,
-            pina: DirA,
-            pinb: DirB,
-            config: timer::config::Config<LSClockSource>,
-        ) -> MotorSpawner<'a, [DCMotor<'a>; 1]>
-        where
-            PwmPin: OutputPin + 'a,
-            DirA: OutputPin + 'a,
-            DirB: OutputPin + 'a,
-        {
-            // 1. Resolve which hardware timer number to use
-            let (timer_num, next_configs) = Self::get_or_assign_timer(self.timer_configs, config);
-            info!("{}", timer_num);
-
-            // 2. Instantiate and configure hardware timer locally
-            let hw_timer = TIMER_STORAGE[Self::timer_to_idx(timer_num)]
-                .init(self.ledc.timer::<LowSpeed>(timer_num));
-            hw_timer.configure(config).unwrap();
-
-            // 3. Configure the PWM Channel
-            let mut pwm = self.ledc.channel(channel::Number::Channel0, pwm_pin);
-
-            pwm.configure(channel::config::Config {
-                timer: hw_timer,
-                duty_pct: 0,
-                drive_mode: DriveMode::PushPull,
-            })
-            .unwrap();
-
-            MotorSpawner {
-                ledc: self.ledc,
-                timer_configs: next_configs,
-                motors: [DCMotor::new(pina, pinb, pwm)],
+                motors: [],
             }
         }
     }
-
     macro_rules! impl_spawner {
-        ($from:literal, $to:literal, $channel:ident, [$($m:ident),*]) => {
+        ($from:literal, $to:literal, $channel:ident, [$($previous_motors:ident),*]) => {
             impl<'a:'static > MotorSpawner<'a, [DCMotor<'a>; $from]> {
                 pub fn spawn<PwmPin: 'a, DirA: 'a, DirB: 'a>(
                     self,
@@ -738,28 +680,23 @@ pub mod dc_motor {
                 where
                     PwmPin: OutputPin, DirA: OutputPin, DirB: OutputPin,
                 {
-                    let (timer_num, next_configs) = Self::get_or_assign_timer(self.timer_configs, config);
-                    info!("{}", timer_num);
-
-                    let hw_timer = TIMER_STORAGE[Self::timer_to_idx(timer_num)]
-                        .init(self.ledc.timer::<LowSpeed>(timer_num));
-                    hw_timer.configure(config).unwrap();
+                    let (shared_timer, next_configs) = Self::get_or_assign_timer(self.ledc, self.timer_configs, config);
 
                     let mut pwm = self.ledc.channel(channel::Number::$channel, pwm_pin);
 
                     pwm.configure(channel::config::Config {
-                        timer: hw_timer,
+                        timer: shared_timer,
                         duty_pct: 0,
                         drive_mode: DriveMode::PushPull,
                     }).unwrap();
 
                     let new_motor = DCMotor::new(pina, pinb, pwm);
 
-                    let [$($m),*] = self.motors;
+                    let [$($previous_motors),*] = self.motors;
                     MotorSpawner {
                         ledc: self.ledc,
                         timer_configs: next_configs,
-                        motors: [$($m,)* new_motor],
+                        motors: [$($previous_motors,)* new_motor],
                     }
                 }
 
@@ -771,7 +708,7 @@ pub mod dc_motor {
         };
     }
 
-    // impl_spawner(0, 1, Channel0, m-1)
+    impl_spawner!(0, 1, Channel0, []);
     impl_spawner!(1, 2, Channel1, [m0]);
     impl_spawner!(2, 3, Channel2, [m0, m1]);
     impl_spawner!(3, 4, Channel3, [m0, m1, m2]);
