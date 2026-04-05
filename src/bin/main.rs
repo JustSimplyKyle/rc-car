@@ -92,18 +92,23 @@ async fn main(spawner: Spawner) -> ! {
         clock_source: timer::LSClockSource::APBClk,
     };
 
+    use rc_car::motor::dc_motor::TimerConfigTrait;
+
+    rc_car::timer_config!(MotorN20, 50_000, timer::config::Duty::Duty8Bit);
+    rc_car::timer_config!(MotorPower, 20_000, timer::config::Duty::Duty10Bit);
+
     let [mut motor_n20, mut motor_power] = motor::dc_motor::MotorSpawner::new(ledc)
-        .spawn(
+        .spawn_new(
             peripherals.GPIO16,
             peripherals.GPIO17,
             peripherals.GPIO18,
-            config_n20,
+            MotorN20,
         )
-        .spawn(
+        .spawn_new(
             peripherals.GPIO10,
             peripherals.GPIO11,
             peripherals.GPIO12,
-            config_power_motor,
+            MotorPower,
         )
         .finish();
 
