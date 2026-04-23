@@ -162,7 +162,7 @@ pub enum StepCmd {
 
 pub async fn step_motor_loop<PWM: PwmPeripheral>(
     cmd: Receiver<'static, CriticalSectionRawMutex, StepCmd, CHANNEL_SIZE>,
-    mut motor: StepMotor<'static, PWM>,
+    mut motor: CDStepMotor<'static, PWM>,
 ) {
     loop {
         match cmd.receive().await {
@@ -231,12 +231,12 @@ macro_rules! impl_step_motor_task {
         #[embassy_executor::task]
         pub async fn $task_name(
             cmd: Receiver<'static, CriticalSectionRawMutex, StepCmd, CHANNEL_SIZE>,
-            motor: StepMotor<'static, $pwm>,
+            motor: CDStepMotor<'static, $pwm>,
         ) {
             step_motor_loop::<$pwm>(cmd, motor).await;
         }
 
-        impl<'d: 'static> StepMotor<'d, $pwm> {
+        impl<'d: 'static> CDStepMotor<'d, $pwm> {
             pub fn spawn_task(
                 self,
                 spawner: &Spawner,
@@ -259,17 +259,17 @@ impl_step_motor_task!(esp_hal::peripherals::MCPWM1<'static>, step_task_mcpwm1);
 // Stepper motor
 // ---------------------------------------------------------------------------
 
-pub struct StepMotorBuilder<'d, PWM: PwmPeripheral> {
+pub struct CDMotorBuilder<'d, PWM: PwmPeripheral> {
     pwm_pin: ErasedPwmPin<'d, PWM>,
 }
 
-pub struct StepMotor<'d, PWM: PwmPeripheral> {
+pub struct CDStepMotor<'d, PWM: PwmPeripheral> {
     pwm_pin: ErasedPwmPin<'d, PWM>,
     pina: Output<'d>,
     pinb: Output<'d>,
 }
 
-impl<'d, PWM: PwmPeripheral> PwmController<'d, PWM> for StepMotorBuilder<'d, PWM> {
+impl<'d, PWM: PwmPeripheral> PwmController<'d, PWM> for CDMotorBuilder<'d, PWM> {
     const MAPPINGS: [(u16, Rate); 3] = [
         (100, Rate::from_khz(1)),
         (100, Rate::from_khz(1)),
@@ -280,13 +280,13 @@ impl<'d, PWM: PwmPeripheral> PwmController<'d, PWM> for StepMotorBuilder<'d, PWM
     }
 }
 
-impl<'d, PWM: PwmPeripheral> StepMotorBuilder<'d, PWM> {
+impl<'d, PWM: PwmPeripheral> CDMotorBuilder<'d, PWM> {
     pub fn into_motor(
         self,
         pina: impl OutputPin + 'd,
         pinb: impl OutputPin + 'd,
-    ) -> StepMotor<'d, PWM> {
-        StepMotor {
+    ) -> CDStepMotor<'d, PWM> {
+        CDStepMotor {
             pwm_pin: self.pwm_pin,
             pina: Output::new(pina, esp_hal::gpio::Level::Low, Default::default()),
             pinb: Output::new(pinb, esp_hal::gpio::Level::Low, Default::default()),
@@ -294,7 +294,7 @@ impl<'d, PWM: PwmPeripheral> StepMotorBuilder<'d, PWM> {
     }
 }
 
-impl<'d, PWM: PwmPeripheral> StepMotor<'d, PWM> {
+impl<'d, PWM: PwmPeripheral> CDStepMotor<'d, PWM> {
     pub fn set_duty_cycle_percent(&mut self, duty_percentage: u8) {
         self.pwm_pin
             .set_duty_cycle_percent(duty_percentage)
@@ -349,7 +349,7 @@ where
     }
 }
 
-impl<'d, PWM: PwmPeripheral> MotorSpawner<'d, PWM, 3, StepMotorBuilder<'d, PWM>> {
+impl<'d, PWM: PwmPeripheral> MotorSpawner<'d, PWM, 3, CDMotorBuilder<'d, PWM>> {
     pub fn new_step(pwm: PWM, spawner: Spawner) -> Self {
         Self::new(pwm, spawner)
     }
@@ -546,3 +546,4 @@ where
 }
 
 pub mod dc_motor;
+pub mod step_motor;

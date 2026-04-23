@@ -17,8 +17,6 @@ defmt                  = "1.0.1"
 esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32s3"] }
 esp-hal                = { version = "1.0.0", features = ["defmt", "esp32s3", "unstable", "rt"] }
 
-include-folder-macro = { path = "../include-folder-macro" }
-
 critical-section = "1.2.0"
 esp-backtrace = { version = "0.18.1", features = [
   "defmt",

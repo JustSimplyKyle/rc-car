@@ -113,11 +113,6 @@ async fn handle_command(Form(form): Form<CommandType>) -> impl IntoResponse {
     }
 }
 
-use include_folder_macro::bundle_dioxus_app;
-
-// This single line triggers the build, parses JSON, and generates the impl
-bundle_dioxus_app!("../controller-ui");
-
 const STATIC_IP: &str = "192.168.2.1/24";
 const GATEWAY_IP: &str = "192.168.2.1";
 
@@ -184,42 +179,42 @@ pub async fn start_wifi(
 
 pub const WEB_POOL_SIZE: usize = 4;
 
-#[embassy_executor::task(pool_size = WEB_POOL_SIZE)]
-pub async fn web_task(
-    id: usize,
-    stack: Stack<'static>,
-    app: &'static AppRouter<Application>,
-    config: &'static picoserve::Config,
-) {
-    let mut tcp_rx = [0u8; 1024];
-    let mut tcp_tx = [0u8; 1024];
-    let mut http_buf = [0u8; 2048];
-    let port = 80;
+// #[embassy_executor::task(pool_size = WEB_POOL_SIZE)]
+// pub async fn web_task(
+//     id: usize,
+//     stack: Stack<'static>,
+//     app: &'static AppRouter<Application>,
+//     config: &'static picoserve::Config,
+// ) {
+//     let mut tcp_rx = [0u8; 1024];
+//     let mut tcp_tx = [0u8; 1024];
+//     let mut http_buf = [0u8; 2048];
+//     let port = 80;
 
-    info!("Web server listening on port {}", port);
+//     info!("Web server listening on port {}", port);
 
-    picoserve::Server::new(&app, &config, &mut http_buf)
-        .listen_and_serve(id, stack, port, &mut tcp_rx, &mut tcp_tx)
-        .await;
-}
+//     picoserve::Server::new(&app, &config, &mut http_buf)
+//         .listen_and_serve(id, stack, port, &mut tcp_rx, &mut tcp_tx)
+//         .await;
+// }
 
-pub async fn start_web_server(spawner: Spawner, stack: embassy_net::Stack<'static>) {
-    info!("Starting web server with {} tasks...", WEB_POOL_SIZE);
+// pub async fn start_web_server(spawner: Spawner, stack: embassy_net::Stack<'static>) {
+//     info!("Starting web server with {} tasks...", WEB_POOL_SIZE);
 
-    let app = make_static!(Application.build_app());
+//     let app = make_static!(Application.build_app());
 
-    let config = make_static!(picoserve::Config::new(picoserve::Timeouts {
-        start_read_request: Duration::from_secs(5).into(),
-        persistent_start_read_request: Duration::from_secs(1).into(),
-        read_request: Duration::from_secs(1).into(),
-        write: Duration::from_secs(1).into(),
-    })
-    .keep_connection_alive());
+//     let config = make_static!(picoserve::Config::new(picoserve::Timeouts {
+//         start_read_request: Duration::from_secs(5).into(),
+//         persistent_start_read_request: Duration::from_secs(1).into(),
+//         read_request: Duration::from_secs(1).into(),
+//         write: Duration::from_secs(1).into(),
+//     })
+//     .keep_connection_alive());
 
-    for id in 0..WEB_POOL_SIZE {
-        spawner.must_spawn(web_task(id, stack, app, config));
-    }
-}
+//     for id in 0..WEB_POOL_SIZE {
+//         spawner.must_spawn(web_task(id, stack, app, config));
+//     }
+// }
 
 #[embassy_executor::task]
 pub async fn connection(mut controller: WifiController<'static>) {
