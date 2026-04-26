@@ -18,8 +18,8 @@ my friend and i had so much issues with that car, that we decided we want to mak
 
 # Project Structure
 the root of the project contains the setup of the firmware, written in esp32-rust.
-`src/bin` - the actual production code for the esp32
-`src/motor` - all the motor control codes are extraplated in here, with mostly complete compile time checking so that timer usage aren't checked at runtime
-`src/ps2.rs & src/ps2_controller_task.rs` - the controller reception api
-`setup` - the pcb & schemcatic(kicad)
-`3d_models` - the 3d models
+- `src/bin` - the actual production code for the esp32
+- `src/motor` - all the motor control codes are extraplated in here, with mostly complete compile time checking so that timer usage aren't checked at runtime
+- `src/ps2.rs & src/ps2_controller_task.rs` - the controller reception api
+- `setup` - the pcb & schemcatic(kicad)
+- `3d_models` - the 3d models
