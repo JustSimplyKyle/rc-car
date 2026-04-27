@@ -15,7 +15,7 @@ use embassy_sync::signal::Signal;
 use embassy_time::Timer;
 use esp_backtrace as _;
 use esp_hal::gpio::{Level, Output, OutputPin};
-use esp_hal::ledc::{self};
+use esp_hal::ledc::{self, Ledc};
 use esp_hal::mcpwm::PeripheralClockConfig;
 use esp_hal::time::Rate;
 use esp_hal::{clock::CpuClock, delay::Delay, timer::timg::TimerGroup};
@@ -52,6 +52,18 @@ async fn main(spawner: Spawner) -> ! {
         peripherals.GPIO11,
         make_static!(Signal::new()),
     );
+
+    use rc_car::motor::dc_motor::TimerConfigTrait;
+    rc_car::timer_config!(MotorN20, 50_000, Duty8Bit);
+    rc_car::timer_config!(MotorPower, 20_000, Duty10Bit);
+    let ledc = make_static!(Ledc::new(peripherals.LEDC));
+
+    let [mut servo1, mut servo2] = motor::dc_motor::MotorSpawner::new_pwm(ledc)
+        .spawn_new(spawner, peripherals.GPIO18, 0, MotorN20)
+        .spawn_new(spawner, peripherals.GPIO20, 0, MotorN20)
+        .finish();
+
+    servo1.send_cmd(ServoCmd::TurnToAngle(30)).await;
 
     loop {
         step_motor.rpm(300.0);

@@ -46,6 +46,7 @@ esp-radio = { version = "0.17.0", features = [ "esp32s3", "coex", "esp-alloc", "
 esp-rtos = { version = "0.2.0", features = ["esp32s3", "embassy", "esp-radio"] }
 esp-println = { version = "0.16.1", features = ["esp32s3", "defmt-espflash"] }
 num = { version = "0.4.3", default-features = false, features = ["alloc"] }
+embedded-graphics = { version = "0.8.2", features = ["defmt"] }
 # embedded-svc = { version = "0.28.1", features = ["defmt"] }
 
 [profile.dev.package.esp-radio]
