@@ -113,21 +113,36 @@ async fn motor_task(
 ) {
     let mut current_rpm: f32 = MIN_RPM;
     let mut target_rpm: f32 = MIN_RPM;
+    let mut final_target_rpm: f32 = MIN_RPM; // Add this to remember the actual goal
 
     let mut accel = SCurveAccel::new(MIN_RPM, MAX_RPM, 25.0);
 
     loop {
         if let Some(new_rpm) = signal.try_take() {
-            let clamped = new_rpm.abs().clamp(MIN_RPM, MAX_RPM) * new_rpm.signum();
-            let reversing = clamped.signum() != current_rpm.signum();
-            target_rpm = if reversing {
-                MIN_RPM * current_rpm.signum() // brake to zero-side first
-            } else {
-                clamped
-            };
+            final_target_rpm = new_rpm.abs().clamp(MIN_RPM, MAX_RPM) * new_rpm.signum();
+        }
+
+        // Handle direction switching state machine
+        if final_target_rpm.signum() != current_rpm.signum() {
+            // Step A: We need to brake to the minimum RPM in the current direction first
+            target_rpm = MIN_RPM * current_rpm.signum();
+
+            // Step B: Once we have successfully decelerated to the minimum speed, flip the direction
+            if (current_rpm - target_rpm).abs() < 0.1 {
+                // Instantly flip the sign of current_rpm (maintains the same minimum speed delay,
+                // but triggers the direction pin swap below)
+                current_rpm = MIN_RPM * final_target_rpm.signum();
+                // Now we can chase the actual requested final speed
+                target_rpm = final_target_rpm;
+            }
+        } else {
+            // Not reversing, just target the final speed
+            target_rpm = final_target_rpm;
         }
 
         current_rpm = accel.next(current_rpm, target_rpm);
+
+        defmt::info!("current rpm: {}", current_rpm);
 
         dir_pin.set_level(if current_rpm >= 0.0 {
             Level::High
