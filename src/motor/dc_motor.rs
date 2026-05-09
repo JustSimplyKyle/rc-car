@@ -167,6 +167,7 @@ impl<Config: TimerConfigTrait> AllocTimer<Config> for End {
         let hw = ledc.timer::<LowSpeed>(idx_to_timer(slot));
         let timer_ref = TIMER_STORAGE[slot].init(hw);
         timer_ref.configure(Config::as_config()).unwrap();
+        info!("Configured timer with freq {}", Config::FREQUENCY);
         (
             timer_ref,
             TimerEntry {
@@ -247,24 +248,28 @@ pub struct PwmMotor<'a> {
     sender: Sender<'a, CriticalSectionRawMutex, ServoCmd, 4>,
 }
 
-impl<'a> PwmMotor<'a> {
-    pub fn new(spawner: Spawner, pwm: Channel<'static, LowSpeed>, initial_angle: i32) -> Self {
-        let channel = make_static!(embassy_sync::channel::Channel::new());
+impl PwmMotor<'_> {
+    pub fn new(
+        spawner: Spawner,
+        pwm: Channel<'static, LowSpeed>,
+        initial_angle: i32,
+        ch: &'static embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>,
+    ) -> Self {
         spawner
             .spawn(servo_motor_loop(
                 initial_angle,
                 Speed::Fast,
-                channel.receiver(),
+                ch.receiver(),
                 pwm,
             ))
-            .ok();
+            .unwrap();
 
         Self {
-            sender: channel.sender(),
+            sender: ch.sender(),
         }
     }
     pub async fn send_cmd(&self, cmd: ServoCmd) {
-        self.sender.send(cmd);
+        self.sender.send(cmd).await;
     }
 }
 
@@ -273,22 +278,20 @@ pub async fn servo_motor_loop(
     mut initial_angle: i32,
     mut speed: Speed,
     cmd: Receiver<'static, CriticalSectionRawMutex, ServoCmd, 4>,
-    pwm: Channel<'static, LowSpeed>,
+    mut pwm: Channel<'static, LowSpeed>,
 ) {
     let mut target_angle = initial_angle;
 
     info!("Moving motor to initial pos.");
 
-    let set_angle = |angle: i32| {
-        pwm.set_duty_hw(
-            duty_from_angle(angle.clamp(0, 180) as u32, pwm.max_duty_cycle().into()).into(),
-        );
+    let mut set_angle = |angle: i32| {
+        let s = duty_from_angle(angle.clamp(0, 180) as u32, pwm.max_duty_cycle().into()).into();
+        info!("turning to angle {} with duty {}", angle, s);
+        pwm.set_duty_hw(s);
     };
 
-    let _guard = MOTOR_MOVING.lock().await;
     set_angle(initial_angle);
     embassy_time::Timer::after_millis(500).await;
-    drop(_guard);
 
     info!("ending moving motor to initial pos");
 
@@ -303,7 +306,7 @@ pub async fn servo_motor_loop(
             continue;
         }
 
-        info!("Moving motor");
+        info!("Moving motor with difference {}", diff);
 
         let step = diff.signum();
 
@@ -325,75 +328,67 @@ pub async fn servo_motor_loop(
     }
 }
 
-impl<'a> MotorSpawner<'a, [DCMotor<'a>; 0], End> {
-    pub fn new_dc(ledc: &'a Ledc<'a>) -> Self {
+impl<'a> MotorSpawner<'a, (), End> {
+    pub fn new(ledc: &'a Ledc<'a>) -> Self {
         Self {
             ledc,
-            motors: [],
+            motors: (),
             timers: End,
         }
     }
 }
 
-impl<'a> MotorSpawner<'a, [PwmMotor<'a>; 0], End> {
-    pub fn new_pwm(ledc: &'a Ledc<'a>) -> Self {
-        Self {
-            ledc,
-            motors: [],
-            timers: End,
-        }
+// ── blanket impl: finish works for any Motors tuple ────────────────────────
+impl<'a, Timers, Motors> MotorSpawner<'a, Motors, Timers> {
+    pub fn finish(self) -> Motors {
+        self.motors
     }
 }
 
-macro_rules! impl_spawner_inner {
-    (
-        $Motor:ident,
-        $from:literal, $to:literal, $channel:ident, [$($m:ident),*]
-        $(; dir $DirA:ident, $pina:ident, $DirB:ident, $pinb:ident)?
-        $(; pre_args  {$($pre_param:ident  : $pre_ty:ty),+})?
-        $(; post_args {$($post_param:ident : $post_ty:ty),+})?
-    ) => {
-        impl<'a: 'static, Timers> MotorSpawner<'a, [$Motor<'a>; $from], Timers>
+// ── single macro: both motor types per slot ────────────────────────────────
+macro_rules! impl_spawner_both {
+    ($channel:ident, [$($m_ty:ident),*]) => {
+        impl<'a: 'static, Timers $(, $m_ty)*> MotorSpawner<'a, ($($m_ty,)*), Timers>
         where
             Timers: TimerCount,
         {
-            pub fn spawn_reuse<PwmPin, $($DirA, $DirB,)? Config, Index>(
+            // ── DC: reuse an existing timer ──────────────────────────────
+            pub fn spawn_dc_reuse<PwmPin, DirA, DirB, Config, Index>(
                 self,
-                $($($pre_param: $pre_ty,)+)?   // e.g. spawner: Spawner
                 pwm_pin: PwmPin,
-                $($pina: $DirA, $pinb: $DirB,)?
-                $($($post_param: $post_ty,)+)?  // e.g. initial_angle: i32
+                pina: DirA,
+                pinb: DirB,
                 _config: Config,
-            ) -> MotorSpawner<'a, [$Motor<'a>; $to], Timers>
+            ) -> MotorSpawner<'a, ($($m_ty,)* DCMotor<'a>,), Timers>
             where
                 PwmPin: OutputPin + 'a,
-                $($DirA: OutputPin + 'a, $DirB: OutputPin + 'a,)?
+                DirA:   OutputPin + 'a,
+                DirB:   OutputPin + 'a,
                 Config: TimerConfigTrait,
                 Timers: FindTimer<Config, Index>,
             {
                 let shared_timer = self.timers.get_timer();
                 let mut pwm = self.ledc.channel(channel::Number::$channel, pwm_pin);
                 pwm.configure(channel::config::Config {
-                    timer: shared_timer,
-                    duty_pct: 0,
-                    drive_mode: DriveMode::PushPull,
+                    timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
                 }).unwrap();
-                let new_motor = $Motor::new($($($pre_param,)+)? $($pina, $pinb,)? pwm $(, $($post_param),+)?);
-                let [$($m),*] = self.motors;
-                MotorSpawner { ledc: self.ledc, motors: [$($m,)* new_motor], timers: self.timers }
+                let new_motor = DCMotor::new(pina, pinb, pwm);
+                let ($($m_ty,)*) = self.motors;
+                MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: self.timers }
             }
 
-            pub fn spawn_new<PwmPin, $($DirA, $DirB,)? Config>(
+            // ── DC: allocate a new timer ─────────────────────────────────
+            pub fn spawn_dc_new<PwmPin, DirA, DirB, Config>(
                 self,
-                $($($pre_param: $pre_ty,)+)?
                 pwm_pin: PwmPin,
-                $($pina: $DirA, $pinb: $DirB,)?
-                $($($post_param: $post_ty,)+)?
+                pina: DirA,
+                pinb: DirB,
                 _config: Config,
-            ) -> MotorSpawner<'a, [$Motor<'a>; $to], <Timers as AllocTimer<Config>>::Output>
+            ) -> MotorSpawner<'a, ($($m_ty,)* DCMotor<'a>,), <Timers as AllocTimer<Config>>::Output>
             where
                 PwmPin: OutputPin + 'a,
-                $($DirA: OutputPin + 'a, $DirB: OutputPin + 'a,)?
+                DirA:   OutputPin + 'a,
+                DirB:   OutputPin + 'a,
                 Config: TimerConfigTrait,
                 Timers: AllocTimer<Config> + HasRoom,
             {
@@ -401,49 +396,71 @@ macro_rules! impl_spawner_inner {
                 let (shared_timer, new_timers) = self.timers.alloc(self.ledc, slot);
                 let mut pwm = self.ledc.channel(channel::Number::$channel, pwm_pin);
                 pwm.configure(channel::config::Config {
-                    timer: shared_timer,
-                    duty_pct: 0,
-                    drive_mode: DriveMode::PushPull,
+                    timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
                 }).unwrap();
-                let new_motor = $Motor::new($($($pre_param,)+)? $($pina, $pinb,)? pwm $(, $($post_param),+)?);
-                let [$($m),*] = self.motors;
-                MotorSpawner { ledc: self.ledc, motors: [$($m,)* new_motor], timers: new_timers }
+                let new_motor = DCMotor::new(pina, pinb, pwm);
+                let ($($m_ty,)*) = self.motors;
+                MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: new_timers }
             }
 
-            pub fn finish(self) -> [$Motor<'a>; $from] {
-                self.motors
+            // ── PWM/servo: reuse an existing timer ───────────────────────
+            pub fn spawn_pwm_reuse<PwmPin, Config, Index>(
+                self,
+                spawner: Spawner,
+                pwm_pin: PwmPin,
+                initial_angle: i32,
+                s: &'static embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>,
+                _config: Config,
+            ) -> MotorSpawner<'a, ($($m_ty,)* PwmMotor<'a>,), Timers>
+            where
+                PwmPin: OutputPin + 'a,
+                Config: TimerConfigTrait,
+                Timers: FindTimer<Config, Index>,
+            {
+                let shared_timer = self.timers.get_timer();
+                let mut pwm = self.ledc.channel(channel::Number::$channel, pwm_pin);
+                pwm.configure(channel::config::Config {
+                    timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
+                }).unwrap();
+                let new_motor = PwmMotor::new(spawner, pwm, initial_angle, s);
+                let ($($m_ty,)*) = self.motors;
+                MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: self.timers }
+            }
+
+            // ── PWM/servo: allocate a new timer ──────────────────────────
+            pub fn spawn_pwm_new<PwmPin, Config>(
+                self,
+                spawner: Spawner,
+                pwm_pin: PwmPin,
+                initial_angle: i32,
+                s: &'static embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>,
+                _config: Config,
+            ) -> MotorSpawner<'a, ($($m_ty,)* PwmMotor<'a>,), <Timers as AllocTimer<Config>>::Output>
+            where
+                PwmPin: OutputPin + 'a,
+                Config: TimerConfigTrait,
+                Timers: AllocTimer<Config> + HasRoom,
+            {
+                let slot = Timers::COUNT;
+                let (shared_timer, new_timers) = self.timers.alloc(self.ledc, slot);
+                let mut pwm = self.ledc.channel(channel::Number::$channel, pwm_pin);
+                pwm.configure(channel::config::Config {
+                    timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
+                }).unwrap();
+                let new_motor = PwmMotor::new(spawner, pwm, initial_angle, s);
+                let ($($m_ty,)*) = self.motors;
+                MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: new_timers }
             }
         }
     }
 }
 
-// Thin wrappers — unchanged call sites
-macro_rules! impl_spawner {
-    ($from:literal, $to:literal, $channel:ident, [$($m:ident),*]) => {
-        impl_spawner_inner!(DCMotor, $from, $to, $channel, [$($m),*]
-            ; dir DirA, pina, DirB, pinb);
-    }
-}
-macro_rules! impl_spawner_pwm {
-    ($from:literal, $to:literal, $channel:ident, [$($m:ident),*]) => {
-        impl_spawner_inner!(PwmMotor, $from, $to, $channel, [$($m),*]
-            ; pre_args  { spawner: Spawner }
-            ; post_args { initial_angle: i32 });
-    }
-}
-impl_spawner!(0, 1, Channel0, []);
-impl_spawner!(1, 2, Channel1, [m0]);
-impl_spawner!(2, 3, Channel2, [m0, m1]);
-impl_spawner!(3, 4, Channel3, [m0, m1, m2]);
-impl_spawner!(4, 5, Channel4, [m0, m1, m2, m3]);
-impl_spawner!(5, 6, Channel5, [m0, m1, m2, m3, m4]);
-impl_spawner!(6, 7, Channel6, [m0, m1, m2, m3, m4, m5]);
-impl_spawner!(7, 8, Channel7, [m0, m1, m2, m3, m4, m5, m6]);
-impl_spawner_pwm!(0, 1, Channel0, []);
-impl_spawner_pwm!(1, 2, Channel1, [m0]);
-impl_spawner_pwm!(2, 3, Channel2, [m0, m1]);
-impl_spawner_pwm!(3, 4, Channel3, [m0, m1, m2]);
-impl_spawner_pwm!(4, 5, Channel4, [m0, m1, m2, m3]);
-impl_spawner_pwm!(5, 6, Channel5, [m0, m1, m2, m3, m4]);
-impl_spawner_pwm!(6, 7, Channel6, [m0, m1, m2, m3, m4, m5]);
-impl_spawner_pwm!(7, 8, Channel7, [m0, m1, m2, m3, m4, m5, m6]);
+// 16 invocations → 8  (one per channel slot, covers both motor types)
+impl_spawner_both!(Channel0, []);
+impl_spawner_both!(Channel1, [m0]);
+impl_spawner_both!(Channel2, [m0, m1]);
+impl_spawner_both!(Channel3, [m0, m1, m2]);
+impl_spawner_both!(Channel4, [m0, m1, m2, m3]);
+impl_spawner_both!(Channel5, [m0, m1, m2, m3, m4]);
+impl_spawner_both!(Channel6, [m0, m1, m2, m3, m4, m5]);
+impl_spawner_both!(Channel7, [m0, m1, m2, m3, m4, m5, m6]);

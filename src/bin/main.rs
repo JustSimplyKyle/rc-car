@@ -42,35 +42,109 @@ async fn main(spawner: Spawner) -> ! {
 
     Timer::after_secs(1).await;
 
-    let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40u32)).unwrap();
-    let mut mcpwm = esp_hal::mcpwm::McPwm::new(peripherals.MCPWM0, clock_cfg);
-    mcpwm.operator0.set_timer(&mcpwm.timer0);
+    // let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40u32)).unwrap();
+    // let mut mcpwm = esp_hal::mcpwm::McPwm::new(peripherals.MCPWM0, clock_cfg);
+    // mcpwm.operator0.set_timer(&mcpwm.timer0);
+    let ledc = make_static!(Ledc::new(peripherals.LEDC));
 
     let step_motor = motor::step_motor::StepMotor::new(
         spawner,
-        peripherals.GPIO12,
-        peripherals.GPIO11,
+        peripherals.GPIO9,
+        peripherals.GPIO10,
         make_static!(Signal::new()),
     );
 
     use rc_car::motor::dc_motor::TimerConfigTrait;
-    rc_car::timer_config!(MotorN20, 50_000, Duty8Bit);
-    rc_car::timer_config!(MotorPower, 20_000, Duty10Bit);
-    let ledc = make_static!(Ledc::new(peripherals.LEDC));
+    rc_car::timer_config!(Servo, 50, Duty14Bit);
+    // rc_car::timer_config!(MotorPower, 20_000, Duty10Bit);
+    // let ledc = make_static!(Ledc::new(peripherals.LEDC));
 
-    let [mut servo1, mut servo2] = motor::dc_motor::MotorSpawner::new_pwm(ledc)
-        .spawn_new(spawner, peripherals.GPIO18, 0, MotorN20)
-        .spawn_new(spawner, peripherals.GPIO20, 0, MotorN20)
+    let s = motor::dc_motor::MotorSpawner::new(ledc)
+        .spawn_pwm_new(
+            spawner,
+            peripherals.GPIO18,
+            0,
+            make_static!(embassy_sync::channel::Channel::new()),
+            Servo,
+        )
+        .spawn_dc_new(
+            peripherals.GPIO1,
+            peripherals.GPIO19,
+            peripherals.GPIO20,
+            Servo,
+        )
         .finish();
+    // let [mut servo1] = motor::dc_motor::MotorSpawner::new_pwm(ledc)
+    //     .spawn_new(
+    //         spawner,
+    //         peripherals.GPIO7,
+    //         45,
+    //         make_static!(embassy_sync::channel::Channel::new()),
+    //         Servo,
+    //     )
+    // .spawn_reuse(
+    //     spawner,
+    //     peripherals.GPIO15,
+    //     90,
+    //     make_static!(embassy_sync::channel::Channel::new()),
+    //     Servo,
+    // )
+    // .finish();
+    // .spawn_new(
+    //         spawner,
+    //         peripherals.GPIO7,
+    //         0,
+    //         make_static!(embassy_sync::channel::Channel::new()),
+    //         Servo,
+    //     )
+    //     .spawn_new(
+    //         spawner,
+    //         peripherals.GPIO16,
+    //         180,
+    //         make_static!(embassy_sync::channel::Channel::new()),
+    //         Servo,
+    //     )
+    //     .spawn_new(
+    //         spawner,
+    //         peripherals.GPIO17,
+    //         0,
+    //         make_static!(embassy_sync::channel::Channel::new()),
+    //         Servo,
+    //     )
+    //     // .spawn_new(spawner, peripherals.GPIO20, 0, Servo)
+    //     .finish();
 
-    servo1.send_cmd(ServoCmd::TurnToAngle(30)).await;
+    // let s = motor::MotorSpawner::new_servo(peripherals.MCPWM0, spawner);
+
+    // let (m1) = s
+    //     .spawn(peripherals.GPIO7, 90)
+    //     .spawn(peripherals.GPIO15, 90)
+    //     // .spawn(peripherals.GPIO16, 90)
+    //     .spawn(peripherals.GPIO17, 45) // [45,90] claw
+    // .finish();
+
+    // servo1.send_cmd(ServoCmd::TurnToAngle(30)).await;
 
     loop {
-        step_motor.rpm(300.0);
-        Timer::after_millis(5000).await;
+        step_motor.rpm(120.0);
+        // Timer::after_millis(8000).await;
+        // servo1.send_cmd(ServoCmd::TurnToAngle(90)).await;
+        // servo1.send_cmd(ServoCmd::TurnToAngle(90)).await;
+        // servo2.send_cmd(ServoCmd::TurnToAngle(90)).await;
+        // servo3.send_cmd(ServoCmd::TurnToAngle(150)).await;
+        // servo4.send_cmd(ServoCmd::TurnToAngle(40)).await;
+        // m1.send(ServoCmd::TurnToAngle(90)).await;
+        // m2.send(ServoCmd::TurnToAngle(40)).await;
 
-        step_motor.rpm(-300.0);
-        Timer::after_millis(5000).await;
+        // step_motor.rpm(-200.0);
+        Timer::after_millis(8000).await;
+        // servo1.send_cmd(ServoCmd::TurnToAngle(0)).await;
+        // servo2.send_cmd(ServoCmd::TurnToAngle(0)).await;
+        // servo3.send_cmd(ServoCmd::TurnToAngle(180)).await;
+        // servo4.send_cmd(ServoCmd::TurnToAngle(0)).await;
+        // m1.send(ServoCmd::TurnToAngle(0)).await;
+        // m2.send(ServoCmd::TurnToAngle(0)).await;
+        // Timer::after_millis(5000).await;
     }
 }
 
