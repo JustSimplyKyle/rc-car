@@ -3,7 +3,7 @@ use core::marker::PhantomData;
 use defmt::info;
 use embassy_executor::{task, Spawner};
 use embassy_sync::{
-    blocking_mutex::{raw::CriticalSectionRawMutex, CriticalSectionMutex},
+    blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Receiver, Sender},
 };
 use embedded_hal::pwm::SetDutyCycle;
@@ -12,14 +12,13 @@ use esp_hal::{
     ledc::{
         self,
         channel::{self, Channel, ChannelHW, ChannelIFace},
-        timer::{self, LSClockSource, Timer, TimerIFace},
-        LSGlobalClkSource, Ledc, LowSpeed,
+        timer::{self, LSClockSource, TimerIFace},
+        Ledc, LowSpeed,
     },
-    mcpwm::PwmPeripheral,
     time::Rate,
 };
 use num::range_step;
-use static_cell::{make_static, StaticCell};
+use static_cell::StaticCell;
 
 use crate::motor::{duty_from_angle, ServoCmd, Speed};
 
@@ -70,12 +69,18 @@ pub trait TimerConfigTrait {
         }
     }
 }
+pub type ServoChannel = embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>;
+
+static TIMER_STORAGE: [StaticCell<ledc::timer::Timer<'static, LowSpeed>>; 4] =
+    [const { StaticCell::new() }; _];
+
+static CHANNEL_STORAGE: [StaticCell<ServoChannel>; 8] = [const { StaticCell::new() }; _];
 
 #[macro_export]
 macro_rules! timer_config {
     ($name:ident, $freq:expr, $duty:ident) => {
         pub struct $name;
-        impl TimerConfigTrait for $name {
+        impl rc_car::motor::ledc_motor::TimerConfigTrait for $name {
             const FREQUENCY: u32 = $freq;
             const DUTY_RESOLUTION: esp_hal::ledc::timer::config::Duty =
                 esp_hal::ledc::timer::config::Duty::$duty;
@@ -147,13 +152,6 @@ pub trait AllocTimer<Config> {
         slot: usize,
     ) -> (&'static timer::Timer<'static, LowSpeed>, Self::Output);
 }
-
-static TIMER_STORAGE: [StaticCell<ledc::timer::Timer<'static, LowSpeed>>; 4] = [
-    StaticCell::new(),
-    StaticCell::new(),
-    StaticCell::new(),
-    StaticCell::new(),
-];
 
 // Base: empty list
 impl<Config: TimerConfigTrait> AllocTimer<Config> for End {
@@ -286,7 +284,6 @@ pub async fn servo_motor_loop(
 
     let set_angle = |angle: i32| {
         let s = duty_from_angle(angle.clamp(0, 180) as u32, pwm.max_duty_cycle().into()).into();
-        // info!("turning to angle {} with duty {}", angle, s);
         pwm.set_duty_hw(s);
     };
 
@@ -428,7 +425,7 @@ macro_rules! impl_spawner_both {
                 spawner: Spawner,
                 pwm_pin: PwmPin,
                 initial_angle: i32,
-                s: &'static embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>,
+                channel: &'static embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>,
                 _config: Config,
             ) -> MotorSpawner<'a, ($($m_ty,)* PwmMotor<'a>,), <Timers as AllocTimer<Config>>::Output>
             where
@@ -443,7 +440,7 @@ macro_rules! impl_spawner_both {
                 pwm.configure(channel::config::Config {
                     timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
                 }).unwrap();
-                let new_motor = PwmMotor::new(spawner, pwm, initial_angle, s);
+                let new_motor = PwmMotor::new(spawner, pwm, initial_angle, channel);
                 let ($($m_ty,)*) = self.motors;
                 MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: new_timers }
             }

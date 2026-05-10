@@ -19,14 +19,9 @@ use static_cell::StaticCell;
 use core::convert::Infallible;
 use core::marker::PhantomData;
 
-const CHANNEL_SIZE: usize = 4;
+use crate::motor::{duty_from_angle, ServoCmd, Speed};
 
-fn duty_from_angle(deg: u32, max_duty_cycle: u32) -> u16 {
-    let min_duty = (25 * max_duty_cycle) / 1000;
-    let max_duty = (125 * max_duty_cycle) / 1000;
-    let duty_gap = max_duty - min_duty;
-    (min_duty + ((deg * duty_gap) / 180)) as u16
-}
+const CHANNEL_SIZE: usize = 4;
 
 pub enum ErasedPwmPin<'d, PWM: PwmPeripheral> {
     Op0(PwmPin<'d, PWM, 0, true>),
@@ -83,20 +78,6 @@ pub trait PwmController<'d, PWM: PwmPeripheral>: Sized {
 // ---------------------------------------------------------------------------
 
 pub type ServoMotor = Sender<'static, CriticalSectionRawMutex, ServoCmd, CHANNEL_SIZE>;
-
-#[derive(Clone, Copy, defmt::Format)]
-pub enum Speed {
-    Slow,
-    Normal,
-    Fast,
-    Instant,
-    Custom(Duration),
-}
-
-pub enum ServoCmd {
-    TurnToAngle(i32),
-    SetSpeed(Speed),
-}
 
 static MOTOR_MOVING: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 
@@ -544,6 +525,3 @@ where
         self.collected[0].take().unwrap()
     }
 }
-
-pub mod dc_motor;
-pub mod step_motor;

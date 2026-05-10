@@ -47,9 +47,6 @@ async fn main(spawner: Spawner) -> ! {
 
     Timer::after_secs(1).await;
 
-    // let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(40u32)).unwrap();
-    // let mut mcpwm = esp_hal::mcpwm::McPwm::new(peripherals.MCPWM0, clock_cfg);
-    // mcpwm.operator0.set_timer(&mcpwm.timer0);
     let ledc = make_static!(Ledc::new(peripherals.LEDC));
     ledc.set_global_slow_clock(ledc::LSGlobalClkSource::APBClk);
 
@@ -60,7 +57,6 @@ async fn main(spawner: Spawner) -> ! {
     //     make_static!(Signal::new()),
     // );
 
-    use rc_car::motor::dc_motor::TimerConfigTrait;
     rc_car::timer_config!(Servo, 50, Duty12Bit);
     rc_car::timer_config!(Dc, 20000, Duty8Bit);
     // rc_car::timer_config!(MotorPower, 20_000, Duty10Bit);
@@ -69,7 +65,7 @@ async fn main(spawner: Spawner) -> ! {
 
     // let (m1) = s.spawn(peripherals.GPIO12, 90).finish();
 
-    let (pwm0,) = motor::dc_motor::MotorSpawner::new(ledc)
+    let (pwm0,) = motor::ledc_motor::MotorSpawner::new(ledc)
         .spawn_pwm_new(
             spawner,
             peripherals.GPIO12,
@@ -152,24 +148,4 @@ impl StatefulAngleManager {
             .saturating_sub(self.step_size)
             .max(self.min_angle);
     }
-}
-
-fn analog_to_servo(raw_value: u8) -> u8 {
-    let mapped = map_range_int(raw_value, 255, 180);
-
-    clamp(mapped, 0, 180)
-}
-
-fn map_range_int<T>(val: T, in_max: T, out_max: T) -> T
-where
-    T: ToPrimitive + FromPrimitive + Unsigned + Copy,
-{
-    let v = val.to_u32().unwrap();
-    let im = in_max.to_u32().unwrap();
-    let om = out_max.to_u32().unwrap();
-
-    // Perform the calculation in u32 space with rounding
-    let result = (v * om + im / 2) / im;
-
-    T::from_u32(result).unwrap()
 }
