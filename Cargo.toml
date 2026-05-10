@@ -52,11 +52,15 @@ embedded-graphics = { version = "0.8.2", features = ["defmt"] }
 [profile.dev.package.esp-radio]
 opt-level = 3
 
-
 [profile.dev]
 # Rust debug is too slow.
 # For debug builds always builds with some optimization
-opt-level = 3
+debug            = 2
+debug-assertions = true
+incremental      = true
+lto              = 'fat'
+opt-level        = 's'
+overflow-checks  = false
 
 [profile.release]
 codegen-units    = 1     # LLVM can perform better optimizations using a single thread

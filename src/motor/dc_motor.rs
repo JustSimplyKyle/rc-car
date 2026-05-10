@@ -21,7 +21,7 @@ use esp_hal::{
 use num::range_step;
 use static_cell::{make_static, StaticCell};
 
-use crate::motor::{duty_from_angle, ServoCmd, Speed, MOTOR_MOVING};
+use crate::motor::{duty_from_angle, ServoCmd, Speed};
 
 pub struct DCMotor<'a> {
     pub pina: Output<'a>,
@@ -278,15 +278,15 @@ pub async fn servo_motor_loop(
     mut initial_angle: i32,
     mut speed: Speed,
     cmd: Receiver<'static, CriticalSectionRawMutex, ServoCmd, 4>,
-    mut pwm: Channel<'static, LowSpeed>,
+    pwm: Channel<'static, LowSpeed>,
 ) {
     let mut target_angle = initial_angle;
 
     info!("Moving motor to initial pos.");
 
-    let mut set_angle = |angle: i32| {
+    let set_angle = |angle: i32| {
         let s = duty_from_angle(angle.clamp(0, 180) as u32, pwm.max_duty_cycle().into()).into();
-        info!("turning to angle {} with duty {}", angle, s);
+        // info!("turning to angle {} with duty {}", angle, s);
         pwm.set_duty_hw(s);
     };
 
@@ -338,7 +338,6 @@ impl<'a> MotorSpawner<'a, (), End> {
     }
 }
 
-// ── blanket impl: finish works for any Motors tuple ────────────────────────
 impl<'a, Timers, Motors> MotorSpawner<'a, Motors, Timers> {
     pub fn finish(self) -> Motors {
         self.motors
@@ -352,7 +351,6 @@ macro_rules! impl_spawner_both {
         where
             Timers: TimerCount,
         {
-            // ── DC: reuse an existing timer ──────────────────────────────
             pub fn spawn_dc_reuse<PwmPin, DirA, DirB, Config, Index>(
                 self,
                 pwm_pin: PwmPin,
@@ -377,7 +375,6 @@ macro_rules! impl_spawner_both {
                 MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: self.timers }
             }
 
-            // ── DC: allocate a new timer ─────────────────────────────────
             pub fn spawn_dc_new<PwmPin, DirA, DirB, Config>(
                 self,
                 pwm_pin: PwmPin,
@@ -403,7 +400,6 @@ macro_rules! impl_spawner_both {
                 MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: new_timers }
             }
 
-            // ── PWM/servo: reuse an existing timer ───────────────────────
             pub fn spawn_pwm_reuse<PwmPin, Config, Index>(
                 self,
                 spawner: Spawner,
@@ -427,7 +423,6 @@ macro_rules! impl_spawner_both {
                 MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: self.timers }
             }
 
-            // ── PWM/servo: allocate a new timer ──────────────────────────
             pub fn spawn_pwm_new<PwmPin, Config>(
                 self,
                 spawner: Spawner,
@@ -444,6 +439,7 @@ macro_rules! impl_spawner_both {
                 let slot = Timers::COUNT;
                 let (shared_timer, new_timers) = self.timers.alloc(self.ledc, slot);
                 let mut pwm = self.ledc.channel(channel::Number::$channel, pwm_pin);
+                info!("allocating timer slot {} and channel {}", slot, channel::Number::$channel);
                 pwm.configure(channel::config::Config {
                     timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
                 }).unwrap();
@@ -455,7 +451,6 @@ macro_rules! impl_spawner_both {
     }
 }
 
-// 16 invocations → 8  (one per channel slot, covers both motor types)
 impl_spawner_both!(Channel0, []);
 impl_spawner_both!(Channel1, [m0]);
 impl_spawner_both!(Channel2, [m0, m1]);

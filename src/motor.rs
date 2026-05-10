@@ -110,14 +110,14 @@ pub async fn servo_motor_loop<PWM: PwmPeripheral>(
 
     info!("Moving motor to initial pos.");
 
-    // let _guard = MOTOR_MOVING.lock().await;
+    let _guard = MOTOR_MOVING.lock().await;
     let period = pwm_pin.period();
     pwm_pin.set_timestamp(duty_from_angle(
         initial_angle.clamp(0, 180) as u32,
         period.into(),
     ));
     embassy_time::Timer::after_millis(500).await;
-    // drop(_guard);
+    drop(_guard);
 
     info!("ending moving motor to initial pos");
 
@@ -209,7 +209,7 @@ macro_rules! impl_servo_motor_task {
                 >; 3] = [StaticCell::new(), StaticCell::new(), StaticCell::new()];
 
                 let op_idx = pin.operator_index();
-                info!("{}", op_idx);
+                info!("operation index: {}", op_idx);
                 let channel = CHANNELS[op_idx].init(channel::Channel::new());
 
                 spawner
