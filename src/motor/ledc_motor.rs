@@ -402,7 +402,6 @@ macro_rules! impl_spawner_both {
                 spawner: Spawner,
                 pwm_pin: PwmPin,
                 initial_angle: i32,
-                s: &'static embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>,
                 _config: Config,
             ) -> MotorSpawner<'a, ($($m_ty,)* PwmMotor<'a>,), Timers>
             where
@@ -415,7 +414,9 @@ macro_rules! impl_spawner_both {
                 pwm.configure(channel::config::Config {
                     timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
                 }).unwrap();
-                let new_motor = PwmMotor::new(spawner, pwm, initial_angle, s);
+                let channel = CHANNEL_STORAGE[channel_to_id(channel::Number::$channel)].init(embassy_sync::channel::Channel::new());
+
+                let new_motor = PwmMotor::new(spawner, pwm, initial_angle, channel);
                 let ($($m_ty,)*) = self.motors;
                 MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: self.timers }
             }
@@ -425,7 +426,6 @@ macro_rules! impl_spawner_both {
                 spawner: Spawner,
                 pwm_pin: PwmPin,
                 initial_angle: i32,
-                channel: &'static embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>,
                 _config: Config,
             ) -> MotorSpawner<'a, ($($m_ty,)* PwmMotor<'a>,), <Timers as AllocTimer<Config>>::Output>
             where
@@ -440,6 +440,7 @@ macro_rules! impl_spawner_both {
                 pwm.configure(channel::config::Config {
                     timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
                 }).unwrap();
+                let channel = CHANNEL_STORAGE[channel_to_id(channel::Number::$channel)].init(embassy_sync::channel::Channel::new());
                 let new_motor = PwmMotor::new(spawner, pwm, initial_angle, channel);
                 let ($($m_ty,)*) = self.motors;
                 MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: new_timers }
@@ -456,3 +457,16 @@ impl_spawner_both!(Channel4, [m0, m1, m2, m3]);
 impl_spawner_both!(Channel5, [m0, m1, m2, m3, m4]);
 impl_spawner_both!(Channel6, [m0, m1, m2, m3, m4, m5]);
 impl_spawner_both!(Channel7, [m0, m1, m2, m3, m4, m5, m6]);
+
+const fn channel_to_id(num: channel::Number) -> usize {
+    match num {
+        channel::Number::Channel0 => 0,
+        channel::Number::Channel1 => 1,
+        channel::Number::Channel2 => 2,
+        channel::Number::Channel3 => 3,
+        channel::Number::Channel4 => 4,
+        channel::Number::Channel5 => 5,
+        channel::Number::Channel6 => 6,
+        channel::Number::Channel7 => 7,
+    }
+}

@@ -66,13 +66,7 @@ async fn main(spawner: Spawner) -> ! {
     // let (m1) = s.spawn(peripherals.GPIO12, 90).finish();
 
     let (pwm0,) = motor::ledc_motor::MotorSpawner::new(ledc)
-        .spawn_pwm_new(
-            spawner,
-            peripherals.GPIO12,
-            90,
-            make_static!(embassy_sync::channel::Channel::new()),
-            Servo,
-        )
+        .spawn_pwm_new(spawner, peripherals.GPIO12, 90, Servo)
         // .spawn_dc_new(
         //     peripherals.GPIO1,
         //     peripherals.GPIO19,
