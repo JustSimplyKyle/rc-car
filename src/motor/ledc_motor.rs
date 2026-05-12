@@ -250,13 +250,13 @@ impl PwmMotor<'_> {
     pub fn new(
         spawner: Spawner,
         pwm: Channel<'static, LowSpeed>,
-        initial_angle: i32,
+        initial_angle: u32,
         ch: &'static embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>,
     ) -> Self {
         spawner
             .spawn(servo_motor_loop(
                 initial_angle,
-                Speed::Fast,
+                Speed::Normal,
                 ch.receiver(),
                 pwm,
             ))
@@ -271,9 +271,9 @@ impl PwmMotor<'_> {
     }
 }
 
-#[task]
+#[task(pool_size = 8)]
 pub async fn servo_motor_loop(
-    mut initial_angle: i32,
+    mut initial_angle: u32,
     mut speed: Speed,
     cmd: Receiver<'static, CriticalSectionRawMutex, ServoCmd, 4>,
     pwm: Channel<'static, LowSpeed>,
@@ -282,8 +282,8 @@ pub async fn servo_motor_loop(
 
     info!("Moving motor to initial pos.");
 
-    let set_angle = |angle: i32| {
-        let s = duty_from_angle(angle.clamp(0, 180) as u32, pwm.max_duty_cycle().into()).into();
+    let set_angle = |angle: u32| {
+        let s = duty_from_angle(angle.clamp(0, 180), pwm.max_duty_cycle().into()).into();
         pwm.set_duty_hw(s);
     };
 
@@ -297,7 +297,7 @@ pub async fn servo_motor_loop(
             ServoCmd::TurnToAngle(new_angle) => target_angle = new_angle,
             ServoCmd::SetSpeed(new_speed) => speed = new_speed,
         }
-        let diff = target_angle - initial_angle;
+        let diff = target_angle as i32 - initial_angle as i32;
 
         if diff == 0 {
             continue;
@@ -307,8 +307,8 @@ pub async fn servo_motor_loop(
 
         let step = diff.signum();
 
-        for angle in range_step(initial_angle, target_angle, step) {
-            set_angle(angle);
+        for angle in range_step(initial_angle as i32, target_angle as i32, step) {
+            set_angle(angle as u32);
 
             match speed {
                 Speed::Slow => embassy_time::Timer::after_millis(15).await,
@@ -401,7 +401,7 @@ macro_rules! impl_spawner_both {
                 self,
                 spawner: Spawner,
                 pwm_pin: PwmPin,
-                initial_angle: i32,
+                initial_angle: u32,
                 _config: Config,
             ) -> MotorSpawner<'a, ($($m_ty,)* PwmMotor<'a>,), Timers>
             where
@@ -425,7 +425,7 @@ macro_rules! impl_spawner_both {
                 self,
                 spawner: Spawner,
                 pwm_pin: PwmPin,
-                initial_angle: i32,
+                initial_angle: u32,
                 _config: Config,
             ) -> MotorSpawner<'a, ($($m_ty,)* PwmMotor<'a>,), <Timers as AllocTimer<Config>>::Output>
             where

@@ -114,13 +114,12 @@ pub async fn ps2_controller_task(mut ps2: Ps2Controller<'static>) {
                 right_analog_stick,
                 raw_buttons: ps2.raw_buttons,
             };
-            // info!("{}", s);
             sender.send(s);
         } else {
             warn!("Controller lost! Reconnecting...");
             let _ = ps2.config_gamepad();
         }
 
-        Timer::after(Duration::from_millis(50)).await;
+        Timer::after(Duration::from_millis(10)).await;
     }
 }

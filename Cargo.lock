@@ -542,6 +542,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "embedded-hal-compat"
+version = "0.13.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08ecac72f6be75ad2d4809c9f07d45502e2e5c9a4e9579077f28d7135de81df3"
+dependencies = [
+ "embedded-hal 0.2.7",
+ "embedded-hal 1.0.0",
+ "nb 1.1.0",
+]
+
+[[package]]
 name = "embedded-io"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1572,6 +1583,7 @@ dependencies = [
  "embedded-graphics",
  "embedded-hal 1.0.0",
  "embedded-hal-bus",
+ "embedded-hal-compat",
  "embedded-io 0.7.1",
  "embedded-io-async 0.7.0",
  "esp-alloc",
@@ -1581,10 +1593,13 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
+ "heapless 0.9.2",
  "num",
  "picoserve",
  "serde",
+ "sh1106",
  "static_cell",
+ "u8g2-fonts",
  "xtensa-lx-rt 0.19.0",
 ]
 
@@ -1729,6 +1744,16 @@ dependencies = [
  "ryu",
  "serde",
  "unsafe-libyaml",
+]
+
+[[package]]
+name = "sh1106"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc12a0563ec9b3b1f99b1f64613581ebbade1347416a34766564f406c15d1bf3"
+dependencies = [
+ "embedded-graphics-core",
+ "embedded-hal 0.2.7",
 ]
 
 [[package]]
@@ -1942,6 +1967,16 @@ name = "typenum"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1dccffe3ce07af9386bfd29e80c0ab1a8205a2fc34e4bcd40364df902cfa8f3f"
+
+[[package]]
+name = "u8g2-fonts"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "825f57be1429fd60f335a4aade11e128a7ae4f89d75ca3a003cb8410a91093f7"
+dependencies = [
+ "embedded-graphics",
+ "embedded-graphics-core",
+]
 
 [[package]]
 name = "ufmt-write"

@@ -70,7 +70,7 @@ pub trait PwmController<'d, PWM: PwmPeripheral>: Sized {
         Self::MAPPINGS[operator].1
     }
 
-    fn new(pin: ErasedPwmPin<'d, PWM>, spawner: &Spawner, initial_angle: i32) -> Self;
+    fn new(pin: ErasedPwmPin<'d, PWM>, spawner: &Spawner, initial_angle: u32) -> Self;
 }
 
 // ---------------------------------------------------------------------------
@@ -82,7 +82,7 @@ pub type ServoMotor = Sender<'static, CriticalSectionRawMutex, ServoCmd, CHANNEL
 static MOTOR_MOVING: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 
 pub async fn servo_motor_loop<PWM: PwmPeripheral>(
-    mut initial_angle: i32,
+    mut initial_angle: u32,
     mut speed: Speed,
     cmd: Receiver<'static, CriticalSectionRawMutex, ServoCmd, CHANNEL_SIZE>,
     mut pwm_pin: ErasedPwmPin<'static, PWM>,
@@ -93,10 +93,7 @@ pub async fn servo_motor_loop<PWM: PwmPeripheral>(
 
     let _guard = MOTOR_MOVING.lock().await;
     let period = pwm_pin.period();
-    pwm_pin.set_timestamp(duty_from_angle(
-        initial_angle.clamp(0, 180) as u32,
-        period.into(),
-    ));
+    pwm_pin.set_timestamp(duty_from_angle(initial_angle.clamp(0, 180), period.into()));
     embassy_time::Timer::after_millis(500).await;
     drop(_guard);
 
@@ -109,7 +106,7 @@ pub async fn servo_motor_loop<PWM: PwmPeripheral>(
         }
         let period = pwm_pin.period();
 
-        let diff = target_angle - initial_angle;
+        let diff = target_angle as i32 - initial_angle as i32;
 
         if diff == 0 {
             continue;
@@ -119,7 +116,7 @@ pub async fn servo_motor_loop<PWM: PwmPeripheral>(
 
         let step = diff.signum();
 
-        for angle in range_step(initial_angle, target_angle, step) {
+        for angle in range_step(initial_angle as i32, target_angle as i32, step) {
             pwm_pin.set_timestamp(duty_from_angle(angle.clamp(0, 180) as u32, period.into()));
             match speed {
                 Speed::Slow => embassy_time::Timer::after_millis(15).await,
@@ -166,7 +163,7 @@ macro_rules! impl_servo_motor_task {
     ($pwm:ty, $task_name:ident) => {
         #[embassy_executor::task(pool_size = 3)]
         pub async fn $task_name(
-            initial_angle: i32,
+            initial_angle: u32,
             speed: Speed,
             cmd: Receiver<'static, CriticalSectionRawMutex, ServoCmd, CHANNEL_SIZE>,
             pwm_pin: ErasedPwmPin<'static, $pwm>,
@@ -183,7 +180,7 @@ macro_rules! impl_servo_motor_task {
             fn new(
                 pin: ErasedPwmPin<'static, $pwm>,
                 spawner: &Spawner,
-                initial_angle: i32,
+                initial_angle: u32,
             ) -> Self {
                 static CHANNELS: [StaticCell<
                     channel::Channel<CriticalSectionRawMutex, ServoCmd, CHANNEL_SIZE>,
@@ -256,7 +253,7 @@ impl<'d, PWM: PwmPeripheral> PwmController<'d, PWM> for CDMotorBuilder<'d, PWM> 
         (100, Rate::from_khz(1)),
         (100, Rate::from_khz(1)),
     ];
-    fn new(pin: ErasedPwmPin<'d, PWM>, _spawner: &Spawner, _initial_angle: i32) -> Self {
+    fn new(pin: ErasedPwmPin<'d, PWM>, _spawner: &Spawner, _initial_angle: u32) -> Self {
         Self { pwm_pin: pin }
     }
 }
@@ -385,7 +382,7 @@ where
         mut self,
         operator_index: usize,
         pin: impl OutputPin + 'd,
-        initial_angle: i32,
+        initial_angle: u32,
     ) -> MotorSpawner<'d, PWM, SLOTS, Motor> {
         let clock_cfg = PeripheralClockConfig::with_frequency(Rate::from_mhz(2)).unwrap();
 
@@ -449,7 +446,7 @@ where
     pub fn spawn(
         self,
         pin: impl OutputPin + 'd,
-        initial_angle: impl Into<Option<i32>>,
+        initial_angle: impl Into<Option<u32>>,
     ) -> MotorSpawner<'d, PWM, 2, M> {
         let initial_angle = initial_angle.into().unwrap_or(0);
         let next = self.spawn_op(0, pin, initial_angle);
@@ -465,7 +462,7 @@ where
     pub fn spawn(
         self,
         pin: impl OutputPin + 'd,
-        initial_angle: impl Into<Option<i32>>,
+        initial_angle: impl Into<Option<u32>>,
     ) -> MotorSpawner<'d, PWM, 1, M> {
         let initial_angle = initial_angle.into().unwrap_or(0);
         let next = self.spawn_op(1, pin, initial_angle);
@@ -481,7 +478,7 @@ where
     pub fn spawn(
         self,
         pin: impl OutputPin + 'd,
-        initial_angle: impl Into<Option<i32>>,
+        initial_angle: impl Into<Option<u32>>,
     ) -> MotorSpawner<'d, PWM, 0, M> {
         let initial_angle = initial_angle.into().unwrap_or(0);
         let next = self.spawn_op(2, pin, initial_angle);

@@ -3,6 +3,8 @@ runner = "espflash flash --monitor --chip esp32s3 --log-format defmt"
 
 [env]
 DEFMT_LOG="info"
+ESP_RTOS_CONFIG_SW_TASK_OVERFLOW_DETECTION = "true"
+ESP_RTOS_MAIN_STACK_SIZE = "32768"
 
 [build]
 rustflags = [
