@@ -103,6 +103,8 @@ pub async fn servo_motor_loop<PWM: PwmPeripheral>(
         match cmd.receive().await {
             ServoCmd::TurnToAngle(new_angle) => target_angle = new_angle,
             ServoCmd::SetSpeed(new_speed) => speed = new_speed,
+            ServoCmd::IncrementBy(_) => todo!(),
+            ServoCmd::DecrementBy(_) => todo!(),
         }
         let period = pwm_pin.period();
 

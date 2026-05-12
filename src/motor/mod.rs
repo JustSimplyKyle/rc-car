@@ -23,4 +23,6 @@ pub enum Speed {
 pub enum ServoCmd {
     TurnToAngle(u32),
     SetSpeed(Speed),
+    IncrementBy(u32),
+    DecrementBy(u32),
 }

@@ -5,6 +5,7 @@ use embassy_executor::{task, Spawner};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex,
     channel::{Receiver, Sender},
+    watch,
 };
 use embedded_hal::pwm::SetDutyCycle;
 use esp_hal::{
@@ -70,11 +71,13 @@ pub trait TimerConfigTrait {
     }
 }
 pub type ServoChannel = embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>;
+pub type Watch = embassy_sync::watch::Watch<CriticalSectionRawMutex, u32, 1>;
 
 static TIMER_STORAGE: [StaticCell<ledc::timer::Timer<'static, LowSpeed>>; 4] =
     [const { StaticCell::new() }; _];
 
 static CHANNEL_STORAGE: [StaticCell<ServoChannel>; 8] = [const { StaticCell::new() }; _];
+static WATCH_STORAGE: [StaticCell<Watch>; 8] = [const { StaticCell::new() }; _];
 
 #[macro_export]
 macro_rules! timer_config {
@@ -244,6 +247,7 @@ pub struct MotorSpawner<'a, Motors, Timers> {
 
 pub struct PwmMotor<'a> {
     sender: Sender<'a, CriticalSectionRawMutex, ServoCmd, 4>,
+    angle: watch::Receiver<'a, CriticalSectionRawMutex, u32, 1>,
 }
 
 impl PwmMotor<'_> {
@@ -251,23 +255,37 @@ impl PwmMotor<'_> {
         spawner: Spawner,
         pwm: Channel<'static, LowSpeed>,
         initial_angle: u32,
-        ch: &'static embassy_sync::channel::Channel<CriticalSectionRawMutex, ServoCmd, 4>,
+        servo_channel: &'static embassy_sync::channel::Channel<
+            CriticalSectionRawMutex,
+            ServoCmd,
+            4,
+        >,
+        servo_angle: &'static Watch,
+        min: u32,
+        max: u32,
     ) -> Self {
         spawner
             .spawn(servo_motor_loop(
                 initial_angle,
                 Speed::Normal,
-                ch.receiver(),
+                min,
+                max,
+                servo_channel.receiver(),
+                servo_angle.sender(),
                 pwm,
             ))
             .unwrap();
 
         Self {
-            sender: ch.sender(),
+            sender: servo_channel.sender(),
+            angle: servo_angle.receiver().unwrap(),
         }
     }
     pub async fn send_cmd(&self, cmd: ServoCmd) {
         self.sender.send(cmd).await;
+    }
+    pub async fn angle(&mut self) -> u32 {
+        self.angle.get().await
     }
 }
 
@@ -275,7 +293,10 @@ impl PwmMotor<'_> {
 pub async fn servo_motor_loop(
     mut initial_angle: u32,
     mut speed: Speed,
+    min: u32,
+    max: u32,
     cmd: Receiver<'static, CriticalSectionRawMutex, ServoCmd, 4>,
+    servo_angle: watch::Sender<'static, CriticalSectionRawMutex, u32, 1>,
     pwm: Channel<'static, LowSpeed>,
 ) {
     let mut target_angle = initial_angle;
@@ -283,7 +304,8 @@ pub async fn servo_motor_loop(
     info!("Moving motor to initial pos.");
 
     let set_angle = |angle: u32| {
-        let s = duty_from_angle(angle.clamp(0, 180), pwm.max_duty_cycle().into()).into();
+        servo_angle.send(angle);
+        let s = duty_from_angle(angle, pwm.max_duty_cycle().into()).into();
         pwm.set_duty_hw(s);
     };
 
@@ -296,7 +318,12 @@ pub async fn servo_motor_loop(
         match cmd.receive().await {
             ServoCmd::TurnToAngle(new_angle) => target_angle = new_angle,
             ServoCmd::SetSpeed(new_speed) => speed = new_speed,
+            ServoCmd::IncrementBy(angle) => target_angle += angle,
+            ServoCmd::DecrementBy(angle) => target_angle = target_angle.saturating_sub(angle),
         }
+
+        target_angle = target_angle.clamp(min, max);
+
         let diff = target_angle as i32 - initial_angle as i32;
 
         if diff == 0 {
@@ -402,6 +429,8 @@ macro_rules! impl_spawner_both {
                 spawner: Spawner,
                 pwm_pin: PwmPin,
                 initial_angle: u32,
+                min: u32,
+                max: u32,
                 _config: Config,
             ) -> MotorSpawner<'a, ($($m_ty,)* PwmMotor<'a>,), Timers>
             where
@@ -415,8 +444,9 @@ macro_rules! impl_spawner_both {
                     timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
                 }).unwrap();
                 let channel = CHANNEL_STORAGE[channel_to_id(channel::Number::$channel)].init(embassy_sync::channel::Channel::new());
+                let watch = WATCH_STORAGE[channel_to_id(channel::Number::$channel)].init(watch::Watch::new());
 
-                let new_motor = PwmMotor::new(spawner, pwm, initial_angle, channel);
+                let new_motor = PwmMotor::new(spawner, pwm, initial_angle, channel, watch, min, max);
                 let ($($m_ty,)*) = self.motors;
                 MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: self.timers }
             }
@@ -426,6 +456,8 @@ macro_rules! impl_spawner_both {
                 spawner: Spawner,
                 pwm_pin: PwmPin,
                 initial_angle: u32,
+                min: u32,
+                max: u32,
                 _config: Config,
             ) -> MotorSpawner<'a, ($($m_ty,)* PwmMotor<'a>,), <Timers as AllocTimer<Config>>::Output>
             where
@@ -441,7 +473,9 @@ macro_rules! impl_spawner_both {
                     timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
                 }).unwrap();
                 let channel = CHANNEL_STORAGE[channel_to_id(channel::Number::$channel)].init(embassy_sync::channel::Channel::new());
-                let new_motor = PwmMotor::new(spawner, pwm, initial_angle, channel);
+                let watch = WATCH_STORAGE[channel_to_id(channel::Number::$channel)].init(watch::Watch::new());
+
+                let new_motor = PwmMotor::new(spawner, pwm, initial_angle, channel, watch, min, max);
                 let ($($m_ty,)*) = self.motors;
                 MotorSpawner { ledc: self.ledc, motors: ($($m_ty,)* new_motor,), timers: new_timers }
             }

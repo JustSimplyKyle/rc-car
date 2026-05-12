@@ -15,7 +15,7 @@ use embedded_hal_compat::ReverseCompat;
 
 use defmt::info;
 // I2C
-use esp_hal::i2c::master::Config as I2cConfig; // for convenience, importing as alias
+use esp_hal::i2c::master::Config as I2cConfig;
 use esp_hal::i2c::master::I2c;
 use esp_hal::time::Rate;
 
@@ -65,33 +65,20 @@ async fn main(spawner: Spawner) -> ! {
     rc_car::timer_config!(Servo, 50, Duty12Bit);
     rc_car::timer_config!(Dc, 20000, Duty8Bit);
 
-    let mut m1 = StatefulAngleManager::new_centered();
-    m1.min_angle = 45;
-    m1.max_angle = 85;
-    let mut m2 = StatefulAngleManager::new_centered();
-    m2.current_angle = 0;
-    let mut m3 = StatefulAngleManager::new_centered();
-    m3.current_angle = 65;
-    let mut m4 = StatefulAngleManager::new_centered();
-    m4.current_angle = 0;
-    let mut m5 = StatefulAngleManager::new();
-    m5.current_angle = 102;
-    m5.min_angle = 76;
-    m5.max_angle = 102 + (102 - 76);
-
-    let (mut dc, pwm1, pwm2, pwm3, pwm4, pwm5) = motor::ledc_motor::MotorSpawner::new(ledc)
-        .spawn_dc_new(
-            peripherals.GPIO10,
-            peripherals.GPIO42,
-            peripherals.GPIO40,
-            Dc,
-        )
-        .spawn_pwm_new(spawner, peripherals.GPIO5, m1.current_angle, Servo)
-        .spawn_pwm_reuse(spawner, peripherals.GPIO6, m2.current_angle, Servo)
-        .spawn_pwm_reuse(spawner, peripherals.GPIO7, m3.current_angle, Servo)
-        .spawn_pwm_reuse(spawner, peripherals.GPIO15, m4.current_angle, Servo)
-        .spawn_pwm_reuse(spawner, peripherals.GPIO16, m5.current_angle, Servo)
-        .finish();
+    let (mut dc, mut m1, mut m2, mut m3, mut m4, mut m5) =
+        motor::ledc_motor::MotorSpawner::new(ledc)
+            .spawn_dc_new(
+                peripherals.GPIO10,
+                peripherals.GPIO42,
+                peripherals.GPIO40,
+                Dc,
+            )
+            .spawn_pwm_new(spawner, peripherals.GPIO5, 0, 45, 85, Servo)
+            .spawn_pwm_reuse(spawner, peripherals.GPIO6, 0, 0, 180, Servo)
+            .spawn_pwm_reuse(spawner, peripherals.GPIO7, 65, 0, 180, Servo)
+            .spawn_pwm_reuse(spawner, peripherals.GPIO15, 0, 0, 180, Servo)
+            .spawn_pwm_reuse(spawner, peripherals.GPIO16, 102, 76, 128, Servo)
+            .finish();
 
     Ps2Controller::spawn(
         peripherals.GPIO14,
@@ -131,43 +118,49 @@ async fn main(spawner: Spawner) -> ! {
     loop {
         buf.clear();
         let s = select(ps2.get(), Timer::after_millis(10)).await;
+        let increment = async |motor: &motor::ledc_motor::PwmMotor<'_>| {
+            motor.send_cmd(ServoCmd::IncrementBy(2)).await;
+        };
+        let decrement = async |motor: &motor::ledc_motor::PwmMotor<'_>| {
+            motor.send_cmd(ServoCmd::DecrementBy(2)).await;
+        };
         match s {
             select::Either::First(ps2) => {
                 info!("{}", ps2.active_buttons());
-                if ps2.any([Button::Up]) {
-                    m1.increment();
+                if ps2.pressed(Button::Up) {
+                    increment(&m1).await;
                 }
-                if ps2.any([Button::Down]) {
-                    m1.decrement();
+                if ps2.pressed(Button::Down) {
+                    decrement(&m1).await;
                 }
                 if ps2.pressed(Button::Y) {
-                    m2.increment();
+                    increment(&m2).await;
                 }
                 if ps2.pressed(Button::A) {
-                    m2.decrement();
+                    decrement(&m2).await;
                 }
                 if ps2.pressed(Button::X) {
-                    m3.increment();
+                    increment(&m3).await;
                 }
                 if ps2.pressed(Button::B) {
-                    m3.decrement();
+                    decrement(&m3).await;
                 }
                 if ps2.pressed(Button::Left) {
-                    m4.increment();
+                    increment(&m4).await;
                 }
                 if ps2.pressed(Button::Right) {
-                    m4.decrement();
+                    decrement(&m4).await;
                 }
                 if ps2.pressed(Button::L2) {
-                    m5.increment();
+                    increment(&m5).await;
                 }
                 if ps2.pressed(Button::R2) {
-                    m5.decrement();
+                    decrement(&m5).await;
                 }
                 if ps2.pressed(Button::Start) {
-                    m2.current_angle = 0;
-                    m3.current_angle = 65;
-                    m4.current_angle = 0;
+                    m2.send_cmd(ServoCmd::TurnToAngle(0)).await;
+                    m3.send_cmd(ServoCmd::TurnToAngle(65)).await;
+                    m4.send_cmd(ServoCmd::TurnToAngle(0)).await;
                 }
                 if ps2.left_analog_stick.y < 127 - 60 {
                     dc.go_back();
@@ -185,7 +178,7 @@ async fn main(spawner: Spawner) -> ! {
         if dirty {
             display.clear();
 
-            write!(buf, "Servo 1: {}", m1.current_angle).unwrap();
+            write!(buf, "Servo 1: {}", m1.angle().await).unwrap();
 
             Text::with_baseline(&buf, Point::new(0, 0), text_style, Baseline::Top)
                 .draw(&mut display)
@@ -193,7 +186,7 @@ async fn main(spawner: Spawner) -> ! {
 
             buf.clear();
 
-            write!(buf, "Servo 2: {}", m2.current_angle).unwrap();
+            write!(buf, "Servo 2: {}", m2.angle().await).unwrap();
 
             Text::with_baseline(&buf, Point::new(0, 9), text_style, Baseline::Top)
                 .draw(&mut display)
@@ -201,7 +194,7 @@ async fn main(spawner: Spawner) -> ! {
 
             buf.clear();
 
-            write!(buf, "Servo 3: {}", m3.current_angle).unwrap();
+            write!(buf, "Servo 3: {}", m3.angle().await).unwrap();
 
             Text::with_baseline(&buf, Point::new(0, 18), text_style, Baseline::Top)
                 .draw(&mut display)
@@ -209,7 +202,7 @@ async fn main(spawner: Spawner) -> ! {
 
             buf.clear();
 
-            write!(buf, "Servo 4: {}", m4.current_angle).unwrap();
+            write!(buf, "Servo 4: {}", m4.angle().await).unwrap();
 
             Text::with_baseline(&buf, Point::new(52 + 13, 0), text_style, Baseline::Top)
                 .draw(&mut display)
@@ -217,65 +210,14 @@ async fn main(spawner: Spawner) -> ! {
 
             buf.clear();
 
-            write!(buf, "Servo 5: {}", m5.current_angle).unwrap();
+            write!(buf, "Servo 5: {}", m5.angle().await).unwrap();
 
             Text::with_baseline(&buf, Point::new(52 + 13, 9), text_style, Baseline::Top)
                 .draw(&mut display)
                 .unwrap();
 
             display.flush().unwrap();
+            dirty = false;
         }
-
-        pwm1.send_cmd(ServoCmd::TurnToAngle(m1.current_angle)).await;
-        pwm2.send_cmd(ServoCmd::TurnToAngle(m2.current_angle)).await;
-        pwm3.send_cmd(ServoCmd::TurnToAngle(m3.current_angle)).await;
-        pwm4.send_cmd(ServoCmd::TurnToAngle(m4.current_angle)).await;
-        pwm5.send_cmd(ServoCmd::TurnToAngle(m5.current_angle)).await;
-    }
-}
-
-pub struct StatefulAngleManager {
-    pub current_angle: u32,
-    pub min_angle: u32,
-    pub max_angle: u32,
-    pub step_size: u32,
-}
-
-impl StatefulAngleManager {
-    pub fn new() -> Self {
-        Self {
-            current_angle: 0,
-            min_angle: 0,
-            max_angle: 180,
-            step_size: 2,
-        }
-    }
-    pub fn new_centered() -> Self {
-        Self {
-            current_angle: 90,
-            min_angle: 0,
-            max_angle: 180,
-            step_size: 2,
-        }
-    }
-
-    pub fn new_with_angle(current_angle: u32) -> Self {
-        Self {
-            current_angle,
-            min_angle: 0,
-            max_angle: 180,
-            step_size: 2,
-        }
-    }
-
-    fn increment(&mut self) {
-        self.current_angle = (self.current_angle + self.step_size).min(self.max_angle);
-    }
-
-    fn decrement(&mut self) {
-        self.current_angle = self
-            .current_angle
-            .saturating_sub(self.step_size)
-            .max(self.min_angle);
     }
 }
