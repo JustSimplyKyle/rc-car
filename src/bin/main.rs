@@ -6,29 +6,27 @@ extern crate alloc;
 extern crate rc_car;
 
 use core::fmt::Write;
+use embassy_sync::watch::Watch;
+use esp_hal::interrupt::software::SoftwareInterruptControl;
+use esp_hal::system::Stack;
 use heapless::String;
 use rc_car::ps2::Button;
 
-use core::time::Duration;
-use embedded_hal_compat::ForwardCompat;
 use embedded_hal_compat::ReverseCompat;
 
 use defmt::info;
-// I2C
 use esp_hal::i2c::master::Config as I2cConfig;
 use esp_hal::i2c::master::I2c;
 use esp_hal::time::Rate;
 
-// OLED
-// use ssd1306::{prelude::*, I2CDisplayInterface, Ssd1306Async};
 use sh1106::{prelude::*, Builder};
 
-// Embedded Graphics
 use embassy_executor::Spawner;
 use embassy_futures::select::{self, select};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time::Timer;
 use embedded_graphics::{
-    mono_font::{ascii::FONT_6X10, MonoTextStyleBuilder},
+    mono_font::{ascii::FONT_5X8, MonoTextStyleBuilder},
     pixelcolor::BinaryColor,
     prelude::Point,
     prelude::*,
@@ -38,23 +36,29 @@ use esp_backtrace as _;
 use esp_hal::ledc::{self, Ledc};
 use esp_hal::{clock::CpuClock, delay::Delay, timer::timg::TimerGroup};
 use esp_println as _;
-use rc_car::motor::{self, ServoCmd, Speed};
+use esp_rtos::start_second_core_with_stack_guard_offset;
+use rc_car::motor::{self, ServoCmd};
 use rc_car::ps2::Ps2Controller;
 use rc_car::ps2_controller_task::PS2_GAMEPAD;
-use static_cell::make_static;
+use static_cell::{make_static, StaticCell};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[esp_rtos::main(stack_size = 32768)]
+#[derive(Clone, Copy, Default)]
+struct DisplayState {
+    angles: [u32; 5],
+}
+
+// Capacity of 1: display core always gets the latest state, older frames are dropped.
+static DISPLAY_WATCH: Watch<CriticalSectionRawMutex, DisplayState, 1> = Watch::new();
+
+#[esp_rtos::main]
 async fn main(spawner: Spawner) -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     esp_alloc::heap_allocator!(size: 64 * 1024);
-    // esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
 
-    // Initialize timers and RNG
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-
     esp_rtos::start(timg0.timer1);
 
     Timer::after_secs(1).await;
@@ -89,135 +93,139 @@ async fn main(spawner: Spawner) -> ! {
         &spawner,
     );
 
+    let interrupt = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+
+    start_second_core_with_stack_guard_offset(
+        peripherals.CPU_CTRL,
+        interrupt.software_interrupt0,
+        interrupt.software_interrupt1,
+        make_static!(Stack::<32768>::new()),
+        None,
+        move || {
+            let i2c_bus = I2c::new(
+                peripherals.I2C0,
+                I2cConfig::default().with_frequency(Rate::from_khz(400)),
+            )
+            .unwrap()
+            .with_scl(peripherals.GPIO1)
+            .with_sda(peripherals.GPIO2);
+
+            let mut display: GraphicsMode<_> = Builder::new()
+                .with_size(DisplaySize::Display128x32)
+                .connect_i2c(i2c_bus.reverse())
+                .into();
+            display.init().unwrap();
+
+            let text_style = MonoTextStyleBuilder::new()
+                .font(&FONT_5X8)
+                .text_color(BinaryColor::On)
+                .build();
+
+            let mut buf: String<32> = String::new();
+            let mut state = DisplayState::default();
+            let mut recv = DISPLAY_WATCH.receiver().unwrap();
+
+            loop {
+                if let Some(new_state) = recv.try_get() {
+                    state = new_state;
+                }
+
+                display.clear();
+
+                const POSITIONS: [(i32, i32); 5] = [(0, 0), (0, 9), (0, 18), (65, 0), (65, 9)];
+
+                for (i, (x, y)) in POSITIONS.iter().enumerate() {
+                    buf.clear();
+                    write!(buf, "Servo {}: {}", i + 1, state.angles[i]).unwrap();
+                    Text::with_baseline(&buf, Point::new(*x, *y), text_style, Baseline::Top)
+                        .draw(&mut display)
+                        .unwrap();
+                }
+
+                display.flush().unwrap();
+
+                // Natural rate limit: the I2C flush above already takes ~10ms at 400kHz.
+                // Add a small yield to avoid hammering the bus faster than needed.
+                // This is a blocking spin on core 1 so we use a simple counter loop
+                // rather than an async timer.
+                for _ in 0..10_000u32 {
+                    core::hint::spin_loop();
+                }
+            }
+        },
+    );
+
     let mut ps2 = PS2_GAMEPAD.receiver().unwrap();
-
-    let i2c_bus = I2c::new(
-        peripherals.I2C0,
-        I2cConfig::default().with_frequency(Rate::from_khz(400)),
-    )
-    .unwrap()
-    .with_scl(peripherals.GPIO1)
-    .with_sda(peripherals.GPIO2);
-
-    let mut display: GraphicsMode<_> = Builder::new()
-        .with_size(DisplaySize::Display128x32)
-        .connect_i2c(i2c_bus.reverse())
-        .into();
-    display.init().unwrap();
-    let mut dirty = false;
-
-    let text_style = MonoTextStyleBuilder::new()
-        .font(&embedded_graphics::mono_font::ascii::FONT_5X8)
-        .text_color(BinaryColor::On)
-        .build();
-
     dc.set_duty_percent(100);
     dc.stop();
 
-    let mut buf: String<64> = String::new();
     loop {
-        buf.clear();
-        let s = select(ps2.get(), Timer::after_millis(10)).await;
-        let increment = async |motor: &motor::ledc_motor::PwmMotor<'_>| {
-            motor.send_cmd(ServoCmd::IncrementBy(2)).await;
+        let state = select(ps2.get(), Timer::after_millis(10)).await;
+
+        let select::Either::First(ps2) = state else {
+            continue;
         };
-        let decrement = async |motor: &motor::ledc_motor::PwmMotor<'_>| {
-            motor.send_cmd(ServoCmd::DecrementBy(2)).await;
-        };
-        match s {
-            select::Either::First(ps2) => {
-                info!("{}", ps2.active_buttons());
-                if ps2.pressed(Button::Up) {
-                    increment(&m1).await;
-                }
-                if ps2.pressed(Button::Down) {
-                    decrement(&m1).await;
-                }
-                if ps2.pressed(Button::Y) {
-                    increment(&m2).await;
-                }
-                if ps2.pressed(Button::A) {
-                    decrement(&m2).await;
-                }
-                if ps2.pressed(Button::X) {
-                    increment(&m3).await;
-                }
-                if ps2.pressed(Button::B) {
-                    decrement(&m3).await;
-                }
-                if ps2.pressed(Button::Left) {
-                    increment(&m4).await;
-                }
-                if ps2.pressed(Button::Right) {
-                    decrement(&m4).await;
-                }
-                if ps2.pressed(Button::L2) {
-                    increment(&m5).await;
-                }
-                if ps2.pressed(Button::R2) {
-                    decrement(&m5).await;
-                }
-                if ps2.pressed(Button::Start) {
-                    m2.send_cmd(ServoCmd::TurnToAngle(0)).await;
-                    m3.send_cmd(ServoCmd::TurnToAngle(65)).await;
-                    m4.send_cmd(ServoCmd::TurnToAngle(0)).await;
-                }
-                if ps2.left_analog_stick.y < 127 - 60 {
-                    dc.go_back();
-                } else if ps2.left_analog_stick.y > 127 + 60 {
-                    dc.go_front();
-                } else {
-                    dc.stop();
-                }
-                info!("{}", ps2.left_analog_stick);
-                dirty = true;
-            }
-            select::Either::Second(()) => {}
+
+        info!("{}", ps2.active_buttons());
+
+        if ps2.pressed(Button::Up) {
+            m1.send_cmd(ServoCmd::IncrementBy(2)).await;
+        }
+        if ps2.pressed(Button::Down) {
+            m1.send_cmd(ServoCmd::DecrementBy(2)).await;
+        }
+        if ps2.pressed(Button::Y) {
+            m2.send_cmd(ServoCmd::IncrementBy(2)).await;
+        }
+        if ps2.pressed(Button::A) {
+            m2.send_cmd(ServoCmd::DecrementBy(2)).await;
+        }
+        if ps2.pressed(Button::X) {
+            m3.send_cmd(ServoCmd::IncrementBy(2)).await;
+        }
+        if ps2.pressed(Button::B) {
+            m3.send_cmd(ServoCmd::DecrementBy(2)).await;
+        }
+        if ps2.pressed(Button::Left) {
+            m4.send_cmd(ServoCmd::IncrementBy(2)).await;
+        }
+        if ps2.pressed(Button::Right) {
+            m4.send_cmd(ServoCmd::DecrementBy(2)).await;
+        }
+        if ps2.pressed(Button::L2) {
+            m5.send_cmd(ServoCmd::IncrementBy(2)).await;
+        }
+        if ps2.pressed(Button::R2) {
+            m5.send_cmd(ServoCmd::DecrementBy(2)).await;
         }
 
-        if dirty {
-            display.clear();
-
-            write!(buf, "Servo 1: {}", m1.angle().await).unwrap();
-
-            Text::with_baseline(&buf, Point::new(0, 0), text_style, Baseline::Top)
-                .draw(&mut display)
-                .unwrap();
-
-            buf.clear();
-
-            write!(buf, "Servo 2: {}", m2.angle().await).unwrap();
-
-            Text::with_baseline(&buf, Point::new(0, 9), text_style, Baseline::Top)
-                .draw(&mut display)
-                .unwrap();
-
-            buf.clear();
-
-            write!(buf, "Servo 3: {}", m3.angle().await).unwrap();
-
-            Text::with_baseline(&buf, Point::new(0, 18), text_style, Baseline::Top)
-                .draw(&mut display)
-                .unwrap();
-
-            buf.clear();
-
-            write!(buf, "Servo 4: {}", m4.angle().await).unwrap();
-
-            Text::with_baseline(&buf, Point::new(52 + 13, 0), text_style, Baseline::Top)
-                .draw(&mut display)
-                .unwrap();
-
-            buf.clear();
-
-            write!(buf, "Servo 5: {}", m5.angle().await).unwrap();
-
-            Text::with_baseline(&buf, Point::new(52 + 13, 9), text_style, Baseline::Top)
-                .draw(&mut display)
-                .unwrap();
-
-            display.flush().unwrap();
-            dirty = false;
+        // ── Reset to home position ────────────────────────────────────
+        if ps2.pressed(Button::Start) {
+            m2.send_cmd(ServoCmd::TurnToAngle(0)).await;
+            m3.send_cmd(ServoCmd::TurnToAngle(65)).await;
+            m4.send_cmd(ServoCmd::TurnToAngle(0)).await;
         }
+
+        if ps2.left_analog_stick.y < 127 - 60 {
+            dc.go_back();
+        } else if ps2.left_analog_stick.y > 127 + 60 {
+            dc.go_front();
+        } else {
+            dc.stop();
+        }
+
+        info!("{}", ps2.left_analog_stick);
+
+        let display_state = DisplayState {
+            angles: [
+                m1.angle().await,
+                m2.angle().await,
+                m3.angle().await,
+                m4.angle().await,
+                m5.angle().await,
+            ],
+        };
+
+        DISPLAY_WATCH.sender().send(display_state);
     }
 }
