@@ -77,7 +77,7 @@ async fn main(spawner: Spawner) -> ! {
                 peripherals.GPIO40,
                 Dc,
             )
-            .spawn_pwm_new(spawner, peripherals.GPIO5, 0, 45, 85, Servo)
+            .spawn_pwm_new(spawner, peripherals.GPIO5, 60, 45, 85, Servo)
             .spawn_pwm_reuse(spawner, peripherals.GPIO6, 0, 0, 180, Servo)
             .spawn_pwm_reuse(spawner, peripherals.GPIO7, 65, 0, 180, Servo)
             .spawn_pwm_reuse(spawner, peripherals.GPIO15, 0, 0, 180, Servo)

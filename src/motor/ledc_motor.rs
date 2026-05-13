@@ -291,7 +291,7 @@ impl PwmMotor<'_> {
 
 #[task(pool_size = 8)]
 pub async fn servo_motor_loop(
-    mut initial_angle: u32,
+    initial_angle: u32,
     mut speed: Speed,
     min: u32,
     max: u32,
@@ -299,6 +299,7 @@ pub async fn servo_motor_loop(
     servo_angle: watch::Sender<'static, CriticalSectionRawMutex, u32, 1>,
     pwm: Channel<'static, LowSpeed>,
 ) {
+    let mut initial_angle = initial_angle.clamp(min, max);
     let mut target_angle = initial_angle;
 
     info!("Moving motor to initial pos.");
@@ -469,9 +470,11 @@ macro_rules! impl_spawner_both {
                 let (shared_timer, new_timers) = self.timers.alloc(self.ledc, slot);
                 let mut pwm = self.ledc.channel(channel::Number::$channel, pwm_pin);
                 info!("allocating timer slot {} and channel {}", slot, channel::Number::$channel);
+
                 pwm.configure(channel::config::Config {
                     timer: shared_timer, duty_pct: 0, drive_mode: DriveMode::PushPull,
                 }).unwrap();
+
                 let channel = CHANNEL_STORAGE[channel_to_id(channel::Number::$channel)].init(embassy_sync::channel::Channel::new());
                 let watch = WATCH_STORAGE[channel_to_id(channel::Number::$channel)].init(watch::Watch::new());
 
