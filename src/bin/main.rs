@@ -77,12 +77,14 @@ async fn main(spawner: Spawner) -> ! {
                 peripherals.GPIO40,
                 Dc,
             )
-            .spawn_pwm_new(spawner, peripherals.GPIO5, 60, 45, 85, Servo)
-            .spawn_pwm_reuse(spawner, peripherals.GPIO6, 0, 0, 180, Servo)
-            .spawn_pwm_reuse(spawner, peripherals.GPIO7, 65, 0, 180, Servo)
-            .spawn_pwm_reuse(spawner, peripherals.GPIO15, 0, 0, 180, Servo)
-            .spawn_pwm_reuse(spawner, peripherals.GPIO16, 102, 76, 128, Servo)
+            .spawn_pwm_new(spawner, peripherals.GPIO18, 60, 45, 85, Servo)
+            .spawn_pwm_reuse(spawner, peripherals.GPIO15, 0, 10, 180, Servo)
+            .spawn_pwm_reuse(spawner, peripherals.GPIO16, 40, 0, 180, Servo)
+            .spawn_pwm_reuse(spawner, peripherals.GPIO17, 0, 0, 180, Servo)
+            .spawn_pwm_reuse(spawner, peripherals.GPIO7, 80, 80 - 35, 80 + 35, Servo)
             .finish();
+
+    dc.set_duty_percent(50);
 
     Ps2Controller::spawn(
         peripherals.GPIO14,
@@ -156,15 +158,11 @@ async fn main(spawner: Spawner) -> ! {
     );
 
     let mut ps2 = PS2_GAMEPAD.receiver().unwrap();
-    dc.set_duty_percent(100);
-    dc.stop();
+    // dc.set_duty_percent(100);
+    // dc.stop();
 
     loop {
-        let state = select(ps2.get(), Timer::after_millis(10)).await;
-
-        let select::Either::First(ps2) = state else {
-            continue;
-        };
+        let ps2 = ps2.get().await;
 
         info!("{}", ps2.active_buttons());
 
@@ -174,16 +172,16 @@ async fn main(spawner: Spawner) -> ! {
         if ps2.pressed(Button::Down) {
             m1.send_cmd(ServoCmd::DecrementBy(2)).await;
         }
-        if ps2.pressed(Button::Y) {
+        if ps2.pressed(Button::R1) {
             m2.send_cmd(ServoCmd::IncrementBy(2)).await;
         }
-        if ps2.pressed(Button::A) {
+        if ps2.pressed(Button::R2) {
             m2.send_cmd(ServoCmd::DecrementBy(2)).await;
         }
-        if ps2.pressed(Button::X) {
+        if ps2.pressed(Button::L1) {
             m3.send_cmd(ServoCmd::IncrementBy(2)).await;
         }
-        if ps2.pressed(Button::B) {
+        if ps2.pressed(Button::L2) {
             m3.send_cmd(ServoCmd::DecrementBy(2)).await;
         }
         if ps2.pressed(Button::Left) {
@@ -192,24 +190,26 @@ async fn main(spawner: Spawner) -> ! {
         if ps2.pressed(Button::Right) {
             m4.send_cmd(ServoCmd::DecrementBy(2)).await;
         }
-        if ps2.pressed(Button::L2) {
-            m5.send_cmd(ServoCmd::IncrementBy(2)).await;
-        }
-        if ps2.pressed(Button::R2) {
-            m5.send_cmd(ServoCmd::DecrementBy(2)).await;
+
+        if ps2.right_analog_stick.x < 127 - 60 {
+            m5.send_cmd(ServoCmd::TurnToAngle(80 - 35)).await;
+        } else if ps2.right_analog_stick.x > 127 + 60 {
+            m5.send_cmd(ServoCmd::TurnToAngle(80 + 35)).await;
+        } else {
+            m5.send_cmd(ServoCmd::TurnToAngle(80)).await;
         }
 
         // ── Reset to home position ────────────────────────────────────
         if ps2.pressed(Button::Start) {
-            m2.send_cmd(ServoCmd::TurnToAngle(0)).await;
-            m3.send_cmd(ServoCmd::TurnToAngle(65)).await;
+            m2.send_cmd(ServoCmd::TurnToAngle(10)).await;
+            m3.send_cmd(ServoCmd::TurnToAngle(40)).await;
             m4.send_cmd(ServoCmd::TurnToAngle(0)).await;
         }
 
         if ps2.left_analog_stick.y < 127 - 60 {
-            dc.go_back();
-        } else if ps2.left_analog_stick.y > 127 + 60 {
             dc.go_front();
+        } else if ps2.left_analog_stick.y > 127 + 60 {
+            dc.go_back();
         } else {
             dc.stop();
         }
@@ -219,13 +219,15 @@ async fn main(spawner: Spawner) -> ! {
         let display_state = DisplayState {
             angles: [
                 m1.angle().await,
-                m2.angle().await,
-                m3.angle().await,
                 m4.angle().await,
+                m3.angle().await,
+                m2.angle().await,
                 m5.angle().await,
             ],
         };
 
         DISPLAY_WATCH.sender().send(display_state);
+
+        Timer::after_millis(50).await;
     }
 }

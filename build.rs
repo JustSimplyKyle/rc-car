@@ -20,6 +20,7 @@ fn main() {
 
     linker_be_nice();
     println!("cargo:rustc-link-arg=-Tdefmt.x");
+    println!("cargo:rustc-link-arg=-Wl,--defsym=_stack_size=0x10000");
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)
     println!("cargo:rustc-link-arg=-Tlinkall.x");
 }
