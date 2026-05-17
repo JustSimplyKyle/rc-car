@@ -42,7 +42,7 @@ serde = { version = "1.0", default-features = false, features = ["derive", "allo
 embassy-sync = { version = "0.7.2", features = ["defmt"] }
 embassy-futures = { version = "0.1.2", features = ["defmt"] }
 embedded-hal = "1.0.0"
-esp-radio = { version = "0.17.0", features = [ "esp32s3", "coex", "esp-alloc", "unstable", "wifi" ] }
+esp-radio = { version = "0.17.0", features = ["esp32s3", "coex", "esp-alloc", "unstable", "wifi", "esp-now"] }
 esp-rtos = { version = "0.2.0", features = ["esp32s3", "embassy", "esp-radio"] }
 esp-println = { version = "0.16.1", features = ["esp32s3", "defmt-espflash"] }
 num = { version = "0.4.3", default-features = false, features = ["alloc"] }
@@ -51,6 +51,7 @@ sh1106= { version = "0.5.0" }
 u8g2-fonts = { version = "0.7.2", features = ["embedded_graphics_textstyle"] }
 embedded-hal-compat = "0.13.0"
 heapless = "0.9.1"
+cobs = { version = "0.5.0", default-features = false, features = ["defmt"] }
 # embedded-svc = { version = "0.28.1", features = ["defmt"] }
 
 [profile.dev.package.esp-radio]
